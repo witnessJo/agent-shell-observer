@@ -1126,6 +1126,117 @@
           (agent-shell-observer-list-filter))
         (should (equal agent-shell-observer--filter-terms '("codex")))))))
 
+;;; A history file set late
+
+(ert-deftest agent-shell-observer-a-history-file-set-late-is-loaded-not-overwritten ()
+  (agent-shell-observer-test-with-agents
+    (let ((late (expand-file-name "late.eld" project)))
+      (agent-shell-observer-test--ask 1 "Kept in the file")
+      (copy-file agent-shell-observer-history-file late)
+      ;; Loaded before the configuration says where its history is.
+      (let ((agent-shell-observer-history-file (expand-file-name "early.eld" project)))
+        (setq agent-shell-observer--entries nil)
+        (agent-shell-observer--load-history)
+        (agent-shell-observer-test--ask 2 "Asked before the file was set")
+        (setq agent-shell-observer-history-file late)
+        (should (equal (mapcar (lambda (entry) (plist-get entry :title))
+                               agent-shell-observer--entries)
+                       '("Asked before the file was set" "Kept in the file")))
+        (should (equal (mapcar (lambda (entry) (plist-get entry :title))
+                               (plist-get (with-temp-buffer
+                                            (insert-file-contents late)
+                                            (read (current-buffer)))
+                                          :entries))
+                       '("Asked before the file was set" "Kept in the file")))
+        ;; Setting it to the same file again changes nothing.
+        (setq agent-shell-observer-history-file late)
+        (should (= (length agent-shell-observer--entries) 2))))))
+
+;;; Names
+
+(defun agent-shell-observer-test--name ()
+  "Return the name of the list's first session, as its row shows it."
+  (with-current-buffer (agent-shell-observer--list-buffer)
+    (agent-shell-observer--refresh-list)
+    (nth 4 (car (agent-shell-observer-test--session-rows)))))
+
+(defun agent-shell-observer-test--rename (name)
+  "Give the list's first session NAME, as `r' on its row does."
+  (with-current-buffer (agent-shell-observer--list-buffer)
+    (agent-shell-observer--refresh-list)
+    (goto-char (point-min))
+    (agent-shell-observer-list-rename name)))
+
+(ert-deftest agent-shell-observer-a-session-has-a-default-name ()
+  (agent-shell-observer-test-with-agents
+    (let ((shell (agent-shell-observer-test--shell 'opencode project))
+          (name (file-name-nondirectory (directory-file-name project))))
+      (with-current-buffer shell (agent-shell-observer-watch-shell))
+      ;; About nothing yet: its agent and project.
+      (should (equal (agent-shell-observer-test--name) (concat "opencode @ " name)))
+      ;; Then what it is about.
+      (agent-shell-observer-test--emit shell 'input-submitted :prompt "Fix the build")
+      (should (equal (agent-shell-observer-test--name) "Fix the build")))))
+
+(ert-deftest agent-shell-observer-r-names-a-session ()
+  (agent-shell-observer-test-with-agents
+    (should (eq (lookup-key agent-shell-observer-list-mode-map "r")
+                #'agent-shell-observer-list-rename))
+    (agent-shell-observer-test--ask 1 "What is on this line?")
+    (should (equal (agent-shell-observer-test--name) "What is on this line?"))
+    (agent-shell-observer-test--rename "  Reader rewrite  ")
+    (should (equal (agent-shell-observer-test--name) "Reader rewrite"))
+    ;; The agent's own title does not take the name's place.
+    (agent-shell-observer-test--emit (car agent-shell-observer-test--shells)
+                                     'session-title-changed :title "Fix the reader")
+    (should (equal (agent-shell-observer-test--name) "Reader rewrite"))
+    ;; The filter finds a session by its name.
+    (let ((agent-shell-observer--filter-terms '("rewrite")))
+      (should (agent-shell-observer-test--session-rows)))
+    ;; A blank name gives the default one back.
+    (agent-shell-observer-test--rename "")
+    (should (equal (agent-shell-observer-test--name) "Fix the reader"))))
+
+(ert-deftest agent-shell-observer-names-stay-with-the-history ()
+  (agent-shell-observer-test-with-agents
+    (agent-shell-observer-test--ask 1)
+    (agent-shell-observer-test--rename "Reader rewrite")
+    (should (equal (plist-get (with-temp-buffer
+                                (insert-file-contents agent-shell-observer-history-file)
+                                (read (current-buffer)))
+                              :names)
+                   '(("antigravity" "session" "Reader rewrite"))))
+    (clrhash agent-shell-observer--names)
+    (agent-shell-observer--load-history)
+    (should (equal (agent-shell-observer-test--name) "Reader rewrite"))
+    ;; A session the list no longer has takes its name with it.
+    (cl-letf (((symbol-function 'y-or-n-p) (lambda (&rest _) t)))
+      (kill-buffer (car agent-shell-observer-test--shells))
+      (with-current-buffer (agent-shell-observer--list-buffer)
+        (agent-shell-observer--refresh-list)
+        (goto-char (point-min))
+        (agent-shell-observer-list-delete)))
+    (should-not (plist-get (with-temp-buffer
+                             (insert-file-contents agent-shell-observer-history-file)
+                             (read (current-buffer)))
+                           :names))))
+
+(ert-deftest agent-shell-observer-a-shell-named-before-its-session-keeps-the-name ()
+  (let ((agent-shell-observer-test--silent '(opencode)))
+    (agent-shell-observer-test-with-agents
+      (let ((shell (agent-shell-observer-test--shell 'opencode project)))
+        (with-current-buffer shell (agent-shell-observer-watch-shell))
+        (agent-shell-observer-test--rename "Build fixes")
+        (should (equal (agent-shell-observer-test--name) "Build fixes"))
+        ;; Its session starts; the name goes with the session from then on.
+        (with-current-buffer shell
+          (setf (alist-get :id (alist-get :session agent-shell--state)) "late"))
+        (should (equal (agent-shell-observer-test--name) "Build fixes"))
+        (agent-shell-observer--save-history)
+        (should (equal (gethash '("opencode" . "late") agent-shell-observer--names)
+                       "Build fixes"))
+        (should-not (gethash shell agent-shell-observer--names))))))
+
 ;;; Titles
 
 (ert-deftest agent-shell-observer-a-session-is-named-by-a-title-of-its-first-question ()

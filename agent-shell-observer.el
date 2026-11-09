@@ -142,6 +142,9 @@ Each is a plist of :id, :time, :cwd, :location, :anchor, :title and
 (defvar agent-shell-observer--history-readable t
   "Nil after a failed history load, to avoid overwriting that file.")
 
+(defvar agent-shell-observer--history-source nil
+  "The history file the list was last loaded from, expanded, or nil.")
+
 (defconst agent-shell-observer--saved-keys
   '(:id :time :cwd :location :anchor :title :prompt
     :status :agent :session-id :failed :tried :summary)
@@ -179,7 +182,8 @@ Identifiers increase across restarts, unlike the displayed clock time."
                                        (dolist (key agent-shell-observer--saved-keys)
                                          (setq saved (plist-put saved key (plist-get entry key))))
                                        saved))
-                                   agent-shell-observer--entries))
+                                   agent-shell-observer--entries)
+                           :names (agent-shell-observer--saved-names))
                      (current-buffer))))
                 (set-file-modes temp #o600)
                 (rename-file temp file t))
@@ -190,6 +194,9 @@ Identifiers increase across restarts, unlike the displayed clock time."
 (defun agent-shell-observer--load-history ()
   "Restore the question list without starting any agent processes.
 Keep an unreadable file intact, and leave live state alone on failure."
+  (setq agent-shell-observer--history-source
+        (and agent-shell-observer-history-file
+             (expand-file-name agent-shell-observer-history-file)))
   (let ((file (and agent-shell-observer-history-file
                    (file-exists-p agent-shell-observer-history-file)
                    agent-shell-observer-history-file)))
@@ -221,6 +228,7 @@ Keep an unreadable file intact, and leave live state alone on failure."
               (when (member (plist-get entry :status)
                             '("Waiting" "Answering…" "Permission" "Restoring…"))
                 (plist-put entry :status "Stopped (Emacs restarted)")))
+            (agent-shell-observer--load-names (plist-get data :names))
             (setq agent-shell-observer--entries entries
                   agent-shell-observer--next-id
                   (apply #'max 0 (mapcar (lambda (entry) (plist-get entry :id)) entries))
@@ -381,6 +389,112 @@ asked when it was a default one, or the shell's last prompt."
         (and (buffer-live-p shell)
              (buffer-local-value 'agent-shell-observer--shell-task shell))
         "")))
+
+;;;; Names
+;;
+;; A session goes by its default name -- what it is about, from
+;; `agent-shell-observer--session-task', or its agent and project while
+;; it is about nothing yet -- until it is given one of its own with `r'
+;; in the list.  Given names are kept with the history, by agent and
+;; session id, so a session keeps its name across restarts.
+
+(defvar agent-shell-observer--names (make-hash-table :test #'equal)
+  "Names given to sessions by hand.
+By (AGENT . SESSION-ID), both strings; a shell whose agent has not
+started a session yet is keyed by its buffer until it has.")
+
+(defun agent-shell-observer--name-key (session)
+  "Return the key SESSION's given name is kept under."
+  (if-let* ((id (agent-shell-observer--session-id session)))
+      (cons (agent-shell-observer--session-agent session) id)
+    (plist-get session :key)))
+
+(defun agent-shell-observer--given-name (session)
+  "Return the name SESSION was given by hand, or nil."
+  (or (gethash (agent-shell-observer--name-key session) agent-shell-observer--names)
+      ;; Named before its agent started a session.
+      (let ((shell (plist-get session :shell)))
+        (and (bufferp shell) (gethash shell agent-shell-observer--names)))))
+
+(defun agent-shell-observer--default-name (session)
+  "Return the name SESSION goes by when it was given none.
+What it is about, or its agent and project while it is about nothing."
+  (let ((task (agent-shell-observer--session-task session)))
+    (if (string-empty-p task)
+        (format "%s @ %s" (agent-shell-observer--session-agent session)
+                (file-name-nondirectory
+                 (directory-file-name (agent-shell-observer--session-cwd session))))
+      task)))
+
+(defun agent-shell-observer--session-name (session)
+  "Return SESSION's name: the one it was given, or its default one."
+  (or (agent-shell-observer--given-name session)
+      (agent-shell-observer--default-name session)))
+
+(defun agent-shell-observer--set-name (session name)
+  "Give SESSION NAME, or its default name back when NAME is nil or blank."
+  (let ((shell (plist-get session :shell)))
+    (when (bufferp shell)
+      (remhash shell agent-shell-observer--names))
+    (remhash (agent-shell-observer--name-key session) agent-shell-observer--names)
+    (when (and name (not (string-blank-p name)))
+      (puthash (agent-shell-observer--name-key session) (string-trim name)
+               agent-shell-observer--names))
+    (agent-shell-observer--save-history)))
+
+(defun agent-shell-observer--saved-names ()
+  "Return the given names to save, as (AGENT SESSION-ID NAME) lists.
+A shell named before it had a session is keyed by that session now; the
+names of sessions the list no longer has are forgotten."
+  (let (shells)
+    (maphash (lambda (key _) (when (bufferp key) (push key shells)))
+             agent-shell-observer--names)
+    (dolist (shell shells)
+      (let ((name (gethash shell agent-shell-observer--names))
+            (id (and (buffer-live-p shell) (agent-shell-observer--session-id-of shell))))
+        ;; A live shell without a session yet keeps standing for it.
+        (unless (and (buffer-live-p shell) (not id))
+          (remhash shell agent-shell-observer--names))
+        (when id
+          (puthash (cons (format "%s" (agent-shell-observer--agent-of shell)) id)
+                   name agent-shell-observer--names)))))
+  (let ((known (append
+                (mapcar (lambda (entry)
+                          (cons (format "%s" (plist-get entry :agent))
+                                (plist-get entry :session-id)))
+                        agent-shell-observer--entries)
+                (mapcar (lambda (shell)
+                          (cons (format "%s" (agent-shell-observer--agent-of shell))
+                                (agent-shell-observer--session-id-of shell)))
+                        (agent-shell-observer--shells))))
+        saved)
+    (maphash (lambda (key name)
+               (when (and (consp key) (member key known))
+                 (push (list (car key) (cdr key) name) saved)))
+             agent-shell-observer--names)
+    (sort saved (lambda (a b) (string< (cadr a) (cadr b))))))
+
+(defun agent-shell-observer--load-names (names)
+  "Take the given NAMES of a history file, as (AGENT SESSION-ID NAME) lists.
+Those of shells named before they had a session stay; malformed ones
+are passed over."
+  (maphash (lambda (key _) (when (consp key) (remhash key agent-shell-observer--names)))
+           agent-shell-observer--names)
+  (when (proper-list-p names)
+    (dolist (item names)
+      (when (and (proper-list-p item) (= (length item) 3) (seq-every-p #'stringp item))
+        (puthash (cons (nth 0 item) (nth 1 item)) (nth 2 item)
+                 agent-shell-observer--names)))))
+
+(defun agent-shell-observer-list-rename (name)
+  "Give the session on this line NAME, shown in the list in place of its own.
+A blank NAME gives the session its default name back."
+  (interactive
+   (list (read-string "Session name (empty for its default): "
+                      (agent-shell-observer--session-name
+                       (agent-shell-observer--session-at-point)))))
+  (agent-shell-observer--set-name (agent-shell-observer--session-at-point) name)
+  (agent-shell-observer--refresh-list))
 
 (defun agent-shell-observer--session-time (session)
   "Return when SESSION last did something, as HH:MM."
@@ -703,7 +817,7 @@ drop-down."
             (agent-shell-observer--session-agent session)
             (propertize (file-name-nondirectory (directory-file-name cwd))
                         'help-echo (abbreviate-file-name cwd))
-            (agent-shell-observer--session-task session))))
+            (agent-shell-observer--session-name session))))
 
 (defun agent-shell-observer--session-id (session)
   "Return the identifier of SESSION's agent session, or nil."
@@ -837,7 +951,7 @@ For `tabulated-list-printer'."
   (and (agent-shell-observer--state-visible-p session)
        (or (null agent-shell-observer--filter-terms)
            (let ((text (string-join
-                        (append (list (agent-shell-observer--session-task session))
+                        (append (list (agent-shell-observer--session-name session))
                                 (mapcar #'car (agent-shell-observer--session-terms session))
                                 (mapcan (lambda (entry)
                                           (list (or (plist-get entry :title) "")
@@ -1423,6 +1537,7 @@ Return its window.  Side by side, the list's window is split for it."
   "TAB" #'agent-shell-observer-list-toggle-session
   "<tab>" #'agent-shell-observer-list-toggle-session
   "D" #'agent-shell-observer-list-delete
+  "r" #'agent-shell-observer-list-rename
   "f" #'agent-shell-observer-list-cycle-filter
   "L" #'agent-shell-observer-list-cycle-layout
   "/" #'agent-shell-observer-list-filter
@@ -1436,11 +1551,10 @@ Return its window.  Side by side, the list's window is split for it."
   "q" #'agent-shell-observer-hide)
 
 (define-derived-mode agent-shell-observer-list-mode tabulated-list-mode "Agent-Observer"
-  "Agent sessions, the one active last first, each with its questions.
+  "Agent sessions, the one active last first.
 TAB, or a click on its arrow, opens or closes a session's details.  RET,
-or a double click elsewhere on the line, opens the conversation of the
-line below the list: a question's, or a session's newest one.  A single
-click only moves to the line.
+or a double click elsewhere on the line, opens its conversation below
+the list.  A single click only moves to the line.  \\`r' names it.
 
 \\{agent-shell-observer-list-mode-map}"
   (setq tabulated-list-format [("" 3 nil)
@@ -1448,7 +1562,7 @@ click only moves to the line.
                                ("Last" 5 nil)
                                ("Agent" 11 nil)
                                ("Project" 18 nil)
-                               ("Task" 0 nil)])
+                               ("Name" 0 nil)])
   (setq tabulated-list-entries #'agent-shell-observer--list-entries)
   (setq tabulated-list-printer #'agent-shell-observer--print-row)
   (setq tabulated-list-padding 0)
@@ -1792,8 +1906,13 @@ A shell's later notification replaces its earlier one."
            (cwd (with-current-buffer shell
                   (or (ignore-errors (agent-shell-cwd)) default-directory)))
            (body (string-join
-                  (delq nil (list (or (buffer-local-value 'agent-shell-observer--shell-title shell)
-                                      (buffer-local-value 'agent-shell-observer--shell-task shell))
+                  (delq nil (list (if-let* ((session (seq-find
+                                                      (lambda (session)
+                                                        (eq (plist-get session :shell) shell))
+                                                      (agent-shell-observer--sessions))))
+                                      (agent-shell-observer--session-name session)
+                                    (or (buffer-local-value 'agent-shell-observer--shell-title shell)
+                                        (buffer-local-value 'agent-shell-observer--shell-task shell)))
                                   (file-name-nondirectory (directory-file-name cwd))
                                   (and (eq what 'error) detail)))
                   "\n")))
@@ -2084,6 +2203,35 @@ Where the conversation goes is `agent-shell-observer-layout'."
 ;; Re-evaluating the source must not discard questions already in memory.
 (unless agent-shell-observer--entries
   (agent-shell-observer--load-history))
+
+(defun agent-shell-observer--switch-history (file)
+  "Load the list from FILE, the history file set after the list was loaded.
+Prompts kept so far stay, above those of FILE, and FILE is saved with
+them: setting the file late, as a configuration may once this file is
+loaded early, must not leave the list empty and overwrite FILE with it."
+  (unless (equal (and file (expand-file-name file)) agent-shell-observer--history-source)
+    (let ((kept agent-shell-observer--entries))
+      (setq agent-shell-observer--entries nil
+            agent-shell-observer--history-readable t)
+      (let ((agent-shell-observer-history-file file))
+        (agent-shell-observer--load-history)
+        (when kept
+          (dolist (entry (reverse kept))
+            (plist-put entry :id (setq agent-shell-observer--next-id
+                                       (1+ agent-shell-observer--next-id)))
+            (push entry agent-shell-observer--entries))
+          (agent-shell-observer--save-history)))
+      (when (get-buffer agent-shell-observer-list-buffer)
+        (agent-shell-observer--refresh-list)))))
+
+(defun agent-shell-observer--history-file-set (_symbol file operation where)
+  "Load the list from FILE when the history file is set to it globally.
+For `add-variable-watcher'; OPERATION and WHERE tell how it is set."
+  (when (and (eq operation 'set) (null where))
+    (agent-shell-observer--switch-history file)))
+
+(add-variable-watcher 'agent-shell-observer-history-file
+                      #'agent-shell-observer--history-file-set)
 
 (provide 'agent-shell-observer)
 ;;; agent-shell-observer.el ends here
