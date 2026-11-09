@@ -77,7 +77,6 @@ session; the list shows sessions, not these."
           (agent-shell-observer--history-readable t)
           (agent-shell-observer--shown nil)
           (agent-shell-observer--opened (make-hash-table :test #'equal))
-          (agent-shell-observer--closed (make-hash-table :test #'equal))
           (agent-shell-observer--filter nil)
           (agent-shell-observer--filter-terms nil)
           (agent-shell-observer-notify-states nil)

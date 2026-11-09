@@ -258,23 +258,14 @@ both have to be alive: either one ending leaves nothing to talk to."
 ;;;; Sessions
 ;;
 ;; The list has a row per agent session: a shell that runs, or the
-;; questions of one whose shell is closed, kept together by their
+;; prompts kept of one whose shell is closed, kept together by their
 ;; session identifier.  A session row opens like a drop-down, TAB or a
-;; click on its arrow, onto where it works, what it waits for, and its
-;; questions, newest first; RET or a double click on a question opens
-;; that conversation below the list, and on the session its newest one.
-;; A session opens by itself when a question is asked in it, not when it
-;; is opened or brought back, and stays as it is left.
+;; click on its arrow, onto where it works and what it waits for; RET or
+;; a double click opens its conversation below the list.  Every session
+;; starts closed, and only TAB or its arrow opens or closes it.
 
 (defvar agent-shell-observer--opened (make-hash-table :test #'equal)
   "Sessions opened in the list, by key.")
-
-(defvar agent-shell-observer--closed (make-hash-table :test #'equal)
-  "Sessions closed in the list by hand, by key, which stay closed.")
-
-(defconst agent-shell-observer--asking-statuses
-  '("Waiting" "Answering…" "Permission")
-  "Statuses of questions being asked, not of conversations brought back.")
 
 (defun agent-shell-observer--session-id-of (shell)
   "Return the identifier of SHELL's session, or nil."
@@ -440,25 +431,15 @@ asked when it was a default one, or the shell's last prompt."
 
 (defun agent-shell-observer--open-p (session)
   "Return non-nil when SESSION's row is opened in the list.
-One not closed by hand opens by itself when a question is asked in it.
-Opening it, and so bringing a closed one back, leaves it as it is."
-  (let ((key (plist-get session :key)))
-    (when (and (not (gethash key agent-shell-observer--closed))
-               (seq-some (lambda (entry)
-                           (member (plist-get entry :status)
-                                   agent-shell-observer--asking-statuses))
-                         (plist-get session :entries)))
-      (puthash key t agent-shell-observer--opened))
-    (gethash key agent-shell-observer--opened)))
+Only `agent-shell-observer-list-toggle-session' opens it: a new session,
+or one busy again, stays closed."
+  (gethash (plist-get session :key) agent-shell-observer--opened))
 
 (defun agent-shell-observer--set-open (session open)
   "Open SESSION's row in the list when OPEN, close it otherwise."
-  (let ((key (plist-get session :key)))
-    (if open
-        (progn (puthash key t agent-shell-observer--opened)
-               (remhash key agent-shell-observer--closed))
-      (remhash key agent-shell-observer--opened)
-      (puthash key t agent-shell-observer--closed))))
+  (if open
+      (puthash (plist-get session :key) t agent-shell-observer--opened)
+    (remhash (plist-get session :key) agent-shell-observer--opened)))
 
 ;;;; Titles
 ;;

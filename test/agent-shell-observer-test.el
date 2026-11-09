@@ -655,8 +655,8 @@
     (save-window-excursion
       (agent-shell-observer-test--ask 1)
       (agent-shell-observer-test--ask 2)
+      (agent-shell-observer-test--open-sessions)
       (with-current-buffer (agent-shell-observer--list-buffer)
-        (agent-shell-observer--refresh-list)
         (let* ((second (car (agent-shell-observer-test--detail-lines)))
                opened)
           (cl-letf (((symbol-function 'mouse-set-point)
@@ -700,24 +700,25 @@
                      (lambda () (setq opened (tabulated-list-get-id)))))
             (agent-shell-observer-list-double-click 0))
           (should (eq (car-safe opened) 'session)))
+        ;; A new session starts closed.
         (goto-char (point-min))
         (should (equal (substring-no-properties (aref (tabulated-list-get-entry) 0) 0 1)
-                       "▼"))
+                       "▶"))
         (let ((opens 0))
           (cl-letf (((symbol-function 'mouse-set-point)
                      (lambda (line) (goto-char (point-min)) (forward-line line)))
                     ((symbol-function 'agent-shell-observer-list-open)
                      (lambda () (setq opens (1+ opens)))))
             (agent-shell-observer-list-click-arrow 0)
-            (should-not (agent-shell-observer-test--detail-lines))
+            (should (agent-shell-observer-test--detail-lines))
             (should (equal (substring-no-properties
                             (aref (save-excursion (goto-char (point-min))
                                                   (tabulated-list-get-entry))
                                   0)
                             0 1)
-                           "▶"))
+                           "▼"))
             (agent-shell-observer-list-click-arrow 0)
-            (should (agent-shell-observer-test--detail-lines))
+            (should-not (agent-shell-observer-test--detail-lines))
             ;; Opening and closing opens no conversation.
             (should (= opens 0))))))))
 
@@ -918,6 +919,13 @@
           (setq line (1+ line)))
         (nreverse lines)))))
 
+(defun agent-shell-observer-test--open-sessions ()
+  "Open every session of the list, as TAB on each would."
+  (dolist (session (agent-shell-observer--sessions))
+    (agent-shell-observer--set-open session t))
+  (with-current-buffer (agent-shell-observer--list-buffer)
+    (agent-shell-observer--refresh-list)))
+
 (defun agent-shell-observer-test--session-rows ()
   "Return the session rows of the list, as lists of their columns, marks aside."
   (with-current-buffer agent-shell-observer-list-buffer
@@ -942,8 +950,8 @@
   (agent-shell-observer-test-with-agents
     (agent-shell-observer-test--ask 1)
     (agent-shell-observer-test--ask 2)
+    (agent-shell-observer-test--open-sessions)
     (with-current-buffer (agent-shell-observer--list-buffer)
-      (agent-shell-observer--refresh-list)
       ;; One shell, one session, keeping its prompts newest first.
       (should (= (length (agent-shell-observer-test--session-rows)) 1))
       (should (equal (mapcar (lambda (row) (nth 3 row)) (agent-shell-observer-test--rows))
@@ -963,18 +971,26 @@
     (agent-shell-observer-test--ask 1)
     (with-current-buffer (agent-shell-observer--list-buffer)
       (agent-shell-observer--refresh-list)
-      ;; A prompt on the go opens its session by itself.
-      (should (agent-shell-observer-test--detail-lines))
+      ;; A new session starts closed, even with a prompt on the go.
+      (should-not (agent-shell-observer-test--detail-lines))
       (goto-char (point-min))
       (agent-shell-observer-list-toggle-session)
-      (should-not (agent-shell-observer-test--detail-lines))
+      (should (agent-shell-observer-test--detail-lines))
       (should (eq (car-safe (tabulated-list-get-id)) 'session))
-      ;; Closed by hand, it stays closed when its question moves on.
+      (agent-shell-observer-list-toggle-session)
+      (should-not (agent-shell-observer-test--detail-lines))
+      ;; It stays closed when it asks for something or gets a new prompt.
       (agent-shell-observer-test--emit (car agent-shell-observer-test--shells)
                                     'permission-request)
+      (agent-shell-observer-test--ask 2)
+      (with-current-buffer (agent-shell-observer--list-buffer)
+        (agent-shell-observer--refresh-list))
       (should-not (agent-shell-observer-test--detail-lines))
+      ;; Opened by hand, it stays open.
       (goto-char (point-min))
       (agent-shell-observer-list-toggle-session)
+      (agent-shell-observer-test--emit (car agent-shell-observer-test--shells)
+                                    'turn-complete :stop-reason "end_turn")
       (should (agent-shell-observer-test--detail-lines)))))
 
 (ert-deftest agent-shell-observer-ret-on-a-session-opens-its-newest-question ()
@@ -1035,6 +1051,7 @@
                      "Run: make test"))
       (should (string-search "⚑1" agent-shell-observer--mode-line-string))
       ;; The drop-down says what it waits for, on a line of its own.
+      (agent-shell-observer-test--open-sessions)
       (with-current-buffer (agent-shell-observer--list-buffer)
         (should (string-search "⚑ Waiting for Run: make test" (buffer-string))))
       (agent-shell-observer-test--emit shell 'permission-response)
@@ -1188,8 +1205,8 @@
   (agent-shell-observer-test-with-agents
     (save-window-excursion
       (agent-shell-observer-test--ask 2)
+      (agent-shell-observer-test--open-sessions)
       (with-current-buffer (agent-shell-observer--list-buffer)
-        (agent-shell-observer--refresh-list)
         (let (opened)
           (cl-letf (((symbol-function 'agent-shell-observer--open-file)
                      (lambda (file) (setq opened file))))
