@@ -5,6 +5,7 @@
 ;; Version: 0.1.0
 ;; Package-Requires: ((emacs "29.1") (agent-shell "0.91.1"))
 ;; Keywords: tools, convenience, ai
+;; URL: https://github.com/witnessJo/agent-shell-observer
 
 ;; This file is not part of GNU Emacs.
 
