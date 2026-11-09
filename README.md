@@ -13,8 +13,8 @@ shows:
 - which agent it is and which project it works in
 - what it is working on
 
-Open a row to see its branch, what it is waiting for, and the prompts sent in
-it. The conversation shows below the list.
+Open a row to see where it works, its branch, and what it is waiting for. The
+conversation shows below the list.
 
 ## Features
 
@@ -71,11 +71,10 @@ Or clone the repository and use `:load-path` instead of `:vc`.
 |---|---|
 | `TAB` / click the arrow | Expand or collapse a session |
 | `RET` / double click | Open the conversation below the list |
-| `v` | Go to the code a prompt was about |
 | `f` | Show all sessions, only those waiting for you, or only those working |
 | `/` | Filter by agent, project, branch or state |
 | `L` | Put the conversation below, to the right of, or to the left of the list |
-| `D` | Remove a prompt, or a whole session, from the list (the agent keeps its sessions) |
+| `D` | Remove a closed session from the list (the agent keeps its sessions) |
 | `g` | Refresh |
 | `q` | Hide the list and the conversation |
 
@@ -86,25 +85,25 @@ Or clone the repository and use `:load-path` instead of `:vc`.
 | `agent-shell-observer-layout` | `below` | Where the conversation goes: `below`, `right` or `left` of the list |
 | `agent-shell-observer-history-file` | `agent-shell-observer-history.eld` in `user-emacs-directory` | Where prompts are saved; `nil` turns saving off |
 | `agent-shell-observer-notify-states` | `(waiting done error)` | Which states send a desktop notification |
-| `agent-shell-observer-summarize-titles` | `t` | Have a local Ollama model write each prompt's title |
+| `agent-shell-observer-summarize-titles` | `t` | Have a local Ollama model name sessions from their first prompt |
 
 ## Sending prompts from your own commands
 
 ```elisp
 (agent-shell-observer-submit shell-buffer prompt
                              :title "Why does this fail?"
-                             :file buffer-file-name :line 42
                              :location "src/foo.el:42")
 ```
 
-The prompt goes to `shell-buffer` and gets a row at the top of the list. `:file`
-and `:line` are the code it is about (`v` in the list goes there), and
-`:location` is how the prompt names that place.
+The prompt goes to `shell-buffer`, whose session moves to the top of the list
+and opens below it. `:title` names the session until a title is written for it,
+and `:location` is the place the prompt is about, as the prompt names it: the
+conversation is scrolled there when the session is opened.
 
 | Hook | |
 |---|---|
-| `agent-shell-observer-failed-functions` | Called with the entry, the agent and the reason when a prompt fails or its shell never starts a session. Return non-nil after sending the entry elsewhere with `agent-shell-observer-resubmit`; otherwise the row shows the error. |
-| `agent-shell-observer-title-text-function` | Returns the text an entry's title is written from, for example the prompt without text every prompt adds. |
+| `agent-shell-observer-failed-functions` | Called with the entry, the agent and the reason when a prompt fails or its shell never starts a session. Return non-nil after sending the entry elsewhere with `agent-shell-observer-resubmit`; otherwise the prompt is marked failed and a message says why. |
+| `agent-shell-observer-title-text-function` | Returns the text a session's title is written from, for example the prompt without text every prompt adds. |
 | `agent-shell-observer-owned-functions` | Marks a shell as driven by something else, so its prompts don't become sessions of their own. |
 
 ## Tests

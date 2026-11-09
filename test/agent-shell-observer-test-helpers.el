@@ -50,19 +50,20 @@
              (list (cons :event event) (cons :data data)))))
 
 (defun agent-shell-observer-test--rows ()
-  "Return the question rows of the list, as lists of their columns.
-Sessions are opened first, so every question is in the list."
-  (with-current-buffer agent-shell-observer-list-buffer
-    (dolist (session (agent-shell-observer--sessions))
-      (agent-shell-observer--set-open session t))
-    (agent-shell-observer--refresh-list)
-    (let (rows)
-      (goto-char (point-min))
-      (while (not (eobp))
-        (when (integerp (tabulated-list-get-id))
-          (push (append (tabulated-list-get-entry) nil) rows))
-        (forward-line 1))
-      (nreverse rows))))
+  "Return what the list keeps of each prompt, session by session.
+Each is (TIME STATUS AGENT LOCATION TITLE), newest first within its
+session; the list shows sessions, not these."
+  (with-current-buffer (agent-shell-observer--list-buffer)
+    (agent-shell-observer--refresh-list))
+  (mapcan (lambda (session)
+            (mapcar (lambda (entry)
+                      (list (plist-get entry :time)
+                            (agent-shell-observer--short-status (plist-get entry :status))
+                            (format "%s" (or (plist-get entry :agent) ""))
+                            (or (plist-get entry :location) "")
+                            (or (plist-get entry :title) (plist-get entry :summary) "")))
+                    (plist-get session :entries)))
+          (seq-filter #'agent-shell-observer--visible-p (agent-shell-observer--sessions))))
 
 (defmacro agent-shell-observer-test-with-agents (&rest body)
   "Run BODY with fake shells for antigravity and codex in a fresh list."

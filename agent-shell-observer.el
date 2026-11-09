@@ -15,10 +15,9 @@
 ;; below it.  A session's row says whether its shell runs, what it is
 ;; doing (working, waiting for a permission or a question, idle), its
 ;; agent, project, git branch, when it last did something and its task,
-;; and opens like a drop-down onto its details and its prompts.  The
-;; answers, permission requests and follow-ups are the shell's own; the
-;; list keeps where each prompt was sent and how far its answer has
-;; come.  `agent-shell-observer-toggle' shows or hides both.
+;; and opens like a drop-down onto its details: where it works and what
+;; it waits for.  The answers, permission requests and follow-ups are the
+;; shell's own.  `agent-shell-observer-toggle' shows or hides both.
 ;;
 ;; With the list closed, the mode line counts the shells waiting for you
 ;; (⚑) and those working (▶), and a desktop notification says when one
@@ -129,8 +128,8 @@ stay with their message.  The ACP server may still transmit older history.")
 
 (defvar agent-shell-observer--entries nil
   "Every question asked, newest first.
-Each is a plist of :id, :time, :cwd, :location, :anchor, :file, :line,
-:title and :prompt, which stay as they are, and :status, :agent,
+Each is a plist of :id, :time, :cwd, :location, :anchor, :title and
+:prompt, which stay as they are, and :status, :agent,
 :shell, :failed and :tried, which change as the agents answer.
 :anchor is where the prompt says the code is, to find it in the shell.")
 
@@ -144,7 +143,7 @@ Each is a plist of :id, :time, :cwd, :location, :anchor, :file, :line,
   "Nil after a failed history load, to avoid overwriting that file.")
 
 (defconst agent-shell-observer--saved-keys
-  '(:id :time :cwd :location :anchor :file :line :title :prompt
+  '(:id :time :cwd :location :anchor :title :prompt
     :status :agent :session-id :failed :tried :summary)
   "Entry fields that can survive an Emacs restart.")
 
@@ -671,23 +670,6 @@ could not be reached, `empty' when it answered with no title."
       (funcall action)
     (user-error "No link here")))
 
-(defun agent-shell-observer--question-cells (entry)
-  "Return ENTRY's cells: time, status, agent, where and question.
-Where is a link to the code when the question is about a file."
-  (let ((file (plist-get entry :file))
-        (line (or (plist-get entry :line) 1))
-        (location (or (plist-get entry :location) "")))
-    (vector (plist-get entry :time)
-            (agent-shell-observer--short-status (plist-get entry :status))
-            (format "%s" (or (plist-get entry :agent) ""))
-            (if (and file (not (string-empty-p location)))
-                (agent-shell-observer--link
-                 location
-                 (lambda () (agent-shell-observer--visit file line))
-                 (format "mouse-1: visit %s:%d" (abbreviate-file-name file) line))
-              location)
-            (or (plist-get entry :title) (plist-get entry :summary) ""))))
-
 (defface agent-shell-observer-arrow
   '((t :height 1.3 :inherit shadow))
   "Face of the arrow a session's drop-down opens and closes with."
@@ -750,15 +732,14 @@ drop-down."
 
 (defun agent-shell-observer--detail-lines (session)
   "Return the lines shown below SESSION's row when it is open.
-Where it works on one line: path, branch and session; what it waits for,
-when it does, on a line of its own that stands out; then its questions."
+Where it works on one line: path, branch and session; and what it waits
+for, when it does, on a line of its own that stands out."
   (let* ((shell (plist-get session :shell))
          (state (agent-shell-observer--session-state session))
          (detail (and (buffer-live-p shell)
                       (buffer-local-value 'agent-shell-observer--shell-detail shell)))
          (id (agent-shell-observer--session-id session))
          (branch (agent-shell-observer--session-branch session))
-         (entries (plist-get session :entries))
          (dim (lambda (text) (propertize text 'face 'shadow))))
     (delq nil
           (list (concat "    "
@@ -784,15 +765,12 @@ when it does, on a line of its own that stands out; then its questions."
                                         ('waiting (format "⚑ Waiting for %s" detail))
                                         ('error (format "Error: %s" detail))
                                         (_ (format "Stopped: %s" detail)))
-                                      'face (if (eq state 'idle) 'shadow 'error))))
-                (concat "    " (funcall dim (if entries
-                                                (format "Questions (%d)" (length entries))
-                                              "No questions yet")))))))
+                                      'face (if (eq state 'idle) 'shadow 'error))))))))
 
 (defun agent-shell-observer--list-entries ()
   "Return the rows of the list, for `tabulated-list-entries'.
-A session's row has the id (session . KEY), the lines below it
-\(detail KEY N), and its questions their own ids."
+A session's row has the id (session . KEY), and the lines below it
+\(detail KEY N)."
   (let (rows)
     (dolist (session (seq-filter #'agent-shell-observer--visible-p
                                  (agent-shell-observer--sessions)))
@@ -801,49 +779,24 @@ A session's row has the id (session . KEY), the lines below it
         (when (agent-shell-observer--open-p session)
           (let ((n 0))
             (dolist (line (agent-shell-observer--detail-lines session))
-              (push (list (list 'detail key (setq n (1+ n))) (vector line)) rows)))
-          (dolist (entry (plist-get session :entries))
-            (push (list (plist-get entry :id) (agent-shell-observer--question-cells entry))
-                  rows)))))
+              (push (list (list 'detail key (setq n (1+ n))) (vector line)) rows))))))
     (nreverse rows)))
 
 (defun agent-shell-observer--print-row (id cols)
-  "Insert the row ID with COLS: a session in columns, the rest as lines.
+  "Insert the row ID with COLS: a session in columns, its details as lines.
 For `tabulated-list-printer'."
   (if (eq (car-safe id) 'session)
       (tabulated-list-print-entry id cols)
     (let ((beg (point)))
-      (insert
-       (if (integerp id)
-           ;; A question, below its session: time, status, the question,
-           ;; then where it was asked, which can be long.
-           (concat "      " (propertize (or (aref cols 0) "") 'face 'shadow) " "
-                   (aref cols 1) (make-string (max 1 (- 11 (string-width (aref cols 1)))) ?\s)
-                   (if (string-empty-p (aref cols 4)) "" (concat (aref cols 4) "  "))
-                   (let ((where (or (aref cols 3) "")))
-                     ;; A link keeps its own look.
-                     (if (get-text-property 0 'agent-shell-observer-link where)
-                         where
-                       (propertize where 'face 'shadow))))
-         (aref cols 0))
-       "\n")
+      (insert (aref cols 0) "\n")
       (add-text-properties beg (point) `(tabulated-list-id ,id tabulated-list-entry ,cols)))))
-
-(defun agent-shell-observer--list-entry ()
-  "Return the question on the list's current line, or signal."
-  (or (and (integerp (tabulated-list-get-id))
-           (agent-shell-observer--entry (tabulated-list-get-id)))
-      (user-error "No question on this line")))
 
 (defun agent-shell-observer--session-at-point ()
   "Return the session of the list's current line, or signal."
   (let ((id (tabulated-list-get-id)))
-    (or (cond ((integerp id)
-               (when-let* ((entry (agent-shell-observer--entry id)))
-                 (agent-shell-observer--session-of entry)))
-              ((memq (car-safe id) '(session detail))
-               (agent-shell-observer--session-by-key
-                (if (eq (car id) 'session) (cdr id) (nth 1 id)))))
+    (or (and (memq (car-safe id) '(session detail))
+             (agent-shell-observer--session-by-key
+              (if (eq (car id) 'session) (cdr id) (nth 1 id))))
         (user-error "No session on this line"))))
 
 (defun agent-shell-observer-list-toggle-session ()
@@ -1222,16 +1175,10 @@ Its drop-down stays as it is."
     (select-window window)))
 
 (defun agent-shell-observer-list-open ()
-  "Open the conversation on this line below the list and go to its shell.
-On a question, that question; on a session, its newest one, or its shell.
-A shell that has been closed is brought back first."
+  "Open the conversation of the session on this line below the list.
+Go to its shell; a shell that has been closed is brought back first."
   (interactive)
-  (if (integerp (tabulated-list-get-id))
-      (agent-shell-observer--open-entry (agent-shell-observer--list-entry))
-    (agent-shell-observer--open-session (agent-shell-observer--session-at-point))))
-
-(defvar-local agent-shell-observer--active-overlay nil
-  "Overlay marking the question whose conversation is displayed below the list.")
+  (agent-shell-observer--open-session (agent-shell-observer--session-at-point)))
 
 (defvar-local agent-shell-observer--session-overlay nil
   "Overlay marking the session displayed below the list.")
@@ -1267,31 +1214,21 @@ not read as a session's arrow."
     overlay))
 
 (defun agent-shell-observer--mark-open-conversation ()
-  "Mark what is shown below the list, whatever line point is on.
-The session's row stands out whole, with a bar in the fringe; its question
-shown, when the session is open, has the bar too."
+  "Mark the session shown below the list, whatever line point is on.
+Its row stands out whole, with a bar in the fringe."
   (when-let* ((buffer (get-buffer agent-shell-observer-list-buffer)))
     (with-current-buffer buffer
-      (dolist (overlay (list agent-shell-observer--active-overlay
-                             agent-shell-observer--session-overlay))
-        (when (overlayp overlay) (delete-overlay overlay)))
-      (setq agent-shell-observer--active-overlay nil
-            agent-shell-observer--session-overlay nil)
-      (let ((session (when-let* ((key (agent-shell-observer--open-session-key)))
-                       (cons 'session key)))
-            (question (plist-get agent-shell-observer--shown :id)))
+      (when (overlayp agent-shell-observer--session-overlay)
+        (delete-overlay agent-shell-observer--session-overlay))
+      (setq agent-shell-observer--session-overlay nil)
+      (when-let* ((key (agent-shell-observer--open-session-key)))
         (save-excursion
           (goto-char (point-min))
           (while (not (eobp))
-            (let ((id (tabulated-list-get-id)))
-              (cond
-               ((and session (equal id session))
-                (setq agent-shell-observer--session-overlay
-                      (agent-shell-observer--mark-line 'agent-shell-observer-open
-                                                    "Shown below the list")))
-               ((and question (eq id question))
-                (setq agent-shell-observer--active-overlay
-                      (agent-shell-observer--mark-line 'bold "Currently open conversation")))))
+            (when (equal (tabulated-list-get-id) (cons 'session key))
+              (setq agent-shell-observer--session-overlay
+                    (agent-shell-observer--mark-line 'agent-shell-observer-open
+                                                     "Shown below the list")))
             (forward-line 1)))))))
 
 (defun agent-shell-observer-list-click (event)
@@ -1303,8 +1240,7 @@ a session's arrow opens and closes its drop-down instead, with
   (mouse-set-point event))
 
 (defun agent-shell-observer-list-double-click (event)
-  "Open the conversation of the line double-clicked below the list.
-On a question, its own; on a session or its details, its newest one."
+  "Open the conversation of the session double-clicked below the list."
   (interactive "e")
   (mouse-set-point event)
   (when (tabulated-list-get-id)
@@ -1343,39 +1279,17 @@ On a question, its own; on a session or its details, its newest one."
 (with-eval-after-load 'agent-shell-markdown
   (setq agent-shell-markdown-open-file-function #'agent-shell-observer--open-file))
 
-(defun agent-shell-observer--visit (file line)
-  "Visit FILE at LINE in a code window, preserving conversation windows."
-  (agent-shell-observer--open-file file)
-  (goto-char (point-min))
-  (forward-line (1- line)))
-
-(defun agent-shell-observer-visit-code ()
-  "Visit the code the question on this line is about.
-On a session, the code of its newest question about a file."
-  (interactive)
-  (let ((entry (if (integerp (tabulated-list-get-id))
-                   (agent-shell-observer--list-entry)
-                 (seq-find (lambda (entry) (plist-get entry :file))
-                           (plist-get (agent-shell-observer--session-at-point) :entries)))))
-    (unless (plist-get entry :file)
-      (user-error "This question is not about a file"))
-    (agent-shell-observer--visit (plist-get entry :file) (plist-get entry :line))))
-
 (defun agent-shell-observer-list-delete ()
-  "Take the question on this line off the list.
-On a session, every question of it, asking first when there are several.
-The agent keeps its own sessions; only the list forgets them."
+  "Take the session on this line off the list, after asking.
+The list forgets what it kept of the session; the agent keeps its own
+sessions, and a shell still open stays in the list."
   (interactive)
   (let ((entries
-         (if (integerp (tabulated-list-get-id))
-             (list (agent-shell-observer--list-entry))
-           (let ((entries (plist-get (agent-shell-observer--session-at-point) :entries)))
-             (unless entries
-               (user-error "This session has no questions to take off"))
-             (when (or (null (cdr entries))
-                       (y-or-n-p (format "Take its %d questions off the list? "
-                                         (length entries))))
-               entries)))))
+         (let ((entries (plist-get (agent-shell-observer--session-at-point) :entries)))
+           (unless entries
+             (user-error "The list keeps nothing of this session to take off"))
+           (when (y-or-n-p "Take this session off the list? ")
+             entries))))
     (when entries
       (setq agent-shell-observer--entries
             (seq-difference agent-shell-observer--entries entries #'eq))
@@ -1527,7 +1441,6 @@ Return its window.  Side by side, the list's window is split for it."
   "<triple-mouse-1>" #'agent-shell-observer-list-click
   "TAB" #'agent-shell-observer-list-toggle-session
   "<tab>" #'agent-shell-observer-list-toggle-session
-  "v" #'agent-shell-observer-visit-code
   "D" #'agent-shell-observer-list-delete
   "f" #'agent-shell-observer-list-cycle-filter
   "L" #'agent-shell-observer-list-cycle-layout
@@ -1682,18 +1595,15 @@ conversation has finished replaying, so its question can now be found."
   "Put PROMPT, to be sent in CWD, at the top of the list and return it.
 PROPS is the plist `agent-shell-observer-submit' takes."
   (let* ((project (file-name-nondirectory (directory-file-name cwd)))
-         (file (plist-get props :file))
          (location (plist-get props :location))
          (entry (list :id (setq agent-shell-observer--next-id (1+ agent-shell-observer--next-id))
                       :time (format-time-string "%H:%M")
                       :cwd cwd
                       ;; Prompts from every project share the list.
-                      :location (if (and file location (file-in-directory-p file cwd))
-                                    (concat project "/" location)
-                                  location)
+                      :location (cond ((null location) project)
+                                      ((file-name-absolute-p location) location)
+                                      (t (concat project "/" location)))
                       :anchor location
-                      :file file
-                      :line (plist-get props :line)
                       :title (plist-get props :title)
                       :prompt prompt
                       :status "Waiting" :agent nil :shell nil :session-id nil
@@ -1968,7 +1878,6 @@ the shell's project, and the list is redrawn without being shown."
                       :cwd cwd
                       :location (file-name-nondirectory (directory-file-name cwd))
                       :anchor first
-                      :file nil :line nil
                       :title first
                       :prompt prompt
                       :status "Answering…"
@@ -2163,10 +2072,11 @@ For `agent-shell-mode-hook', so shells started on their own show too."
 
 (defun agent-shell-observer-submit (shell-buffer prompt &rest props)
   "Send PROMPT to SHELL-BUFFER and follow it at the top of the list.
-PROPS may give :title, what the list calls it; :file and :line, the code
-it is about, which `v' in the list visits; and :location, where that
-code is, as the prompt says it, such as \"src/foo.el:10-20\".  The shell
-is shown below the list.  Return the entry, for
+PROPS may give :title, what the session is called until a title is
+written for it; and :location, where in the project the prompt is about,
+as the prompt says it, such as \"src/foo.el:10-20\", for the shell to be
+scrolled there when the session is opened.  The shell is shown below the
+list.  Return the entry, for
 `agent-shell-observer-resubmit'."
   (require 'agent-shell)
   (agent-shell-observer--ensure-sendable shell-buffer)

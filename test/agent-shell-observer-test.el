@@ -578,7 +578,8 @@
     (with-current-buffer (agent-shell-observer--list-buffer)
       (tabulated-list-print t)
       (goto-char (point-min))
-      (agent-shell-observer-list-delete))
+      (cl-letf (((symbol-function 'y-or-n-p) (lambda (&rest _) t)))
+        (agent-shell-observer-list-delete)))
     (agent-shell-observer--load-history)
     (should-not agent-shell-observer--entries)))
 
@@ -635,15 +636,9 @@
           (let ((this-command 'next-line) (last-command-event ?n))
             (run-hooks 'post-command-hook))
           (should (eq opened agent-shell-observer--shown))
-          (save-excursion
-            (goto-char (overlay-start agent-shell-observer--active-overlay))
-            (should (eq (tabulated-list-get-id) (plist-get opened :id))))
           (agent-shell-observer--refresh-list)
-          (save-excursion
-            (goto-char (overlay-start agent-shell-observer--active-overlay))
-            (should (eq (tabulated-list-get-id) (plist-get opened :id))))
-          ;; Its session's row stands out too, with a bar, not a triangle
-          ;; that would read as the session's arrow.
+          ;; Its session's row stands out, with a bar, not a triangle that
+          ;; would read as the session's arrow.
           (save-excursion
             (goto-char (overlay-start agent-shell-observer--session-overlay))
             (should (equal (tabulated-list-get-id)
@@ -661,7 +656,8 @@
       (agent-shell-observer-test--ask 1)
       (agent-shell-observer-test--ask 2)
       (with-current-buffer (agent-shell-observer--list-buffer)
-        (let* ((second (cadr (agent-shell-observer-test--question-lines)))
+        (agent-shell-observer--refresh-list)
+        (let* ((second (car (agent-shell-observer-test--detail-lines)))
                opened)
           (cl-letf (((symbol-function 'mouse-set-point)
                      (lambda (line) (goto-char (point-min)) (forward-line line)))
@@ -674,9 +670,7 @@
             (agent-shell-observer-list-click 0)
             (agent-shell-observer-list-click 0)
             (should-not opened)
-            ;; A double click opens the line: a question, or a session.
-            (agent-shell-observer-list-double-click second)
-            (should (integerp (car opened)))
+            ;; A double click opens the line's session.
             (agent-shell-observer-list-double-click 0)
             (should (eq (car-safe (car opened)) 'session))
             ;; The details below a session stand for it.
@@ -715,7 +709,7 @@
                     ((symbol-function 'agent-shell-observer-list-open)
                      (lambda () (setq opens (1+ opens)))))
             (agent-shell-observer-list-click-arrow 0)
-            (should-not (agent-shell-observer-test--question-lines))
+            (should-not (agent-shell-observer-test--detail-lines))
             (should (equal (substring-no-properties
                             (aref (save-excursion (goto-char (point-min))
                                                   (tabulated-list-get-entry))
@@ -723,7 +717,7 @@
                             0 1)
                            "▶"))
             (agent-shell-observer-list-click-arrow 0)
-            (should (agent-shell-observer-test--question-lines))
+            (should (agent-shell-observer-test--detail-lines))
             ;; Opening and closing opens no conversation.
             (should (= opens 0))))))))
 
@@ -912,14 +906,14 @@
 
 ;;; Sessions
 
-(defun agent-shell-observer-test--question-lines ()
-  "Return the line numbers, from 0, of the questions in the list."
+(defun agent-shell-observer-test--detail-lines ()
+  "Return the line numbers, from 0, of the sessions' details in the list."
   (with-current-buffer agent-shell-observer-list-buffer
     (save-excursion
       (goto-char (point-min))
       (let ((line 0) lines)
         (while (not (eobp))
-          (when (integerp (tabulated-list-get-id)) (push line lines))
+          (when (eq (car-safe (tabulated-list-get-id)) 'detail) (push line lines))
           (forward-line 1)
           (setq line (1+ line)))
         (nreverse lines)))))
@@ -944,40 +938,44 @@
     (make-process :name "fake-shell" :buffer shell :noquery t
                   :command '("sleep" "60"))))
 
-(ert-deftest agent-shell-observer-a-session-holds-its-shell-questions ()
+(ert-deftest agent-shell-observer-a-session-holds-its-shell-prompts ()
   (agent-shell-observer-test-with-agents
     (agent-shell-observer-test--ask 1)
     (agent-shell-observer-test--ask 2)
     (with-current-buffer (agent-shell-observer--list-buffer)
       (agent-shell-observer--refresh-list)
-      ;; One shell, one session, its questions newest first below it.
+      ;; One shell, one session, keeping its prompts newest first.
       (should (= (length (agent-shell-observer-test--session-rows)) 1))
       (should (equal (mapcar (lambda (row) (nth 3 row)) (agent-shell-observer-test--rows))
                      (let ((name (file-name-nondirectory (directory-file-name project))))
                        (list (concat name "/code.el:2") (concat name "/code.el:1")))))
-      ;; Where it works on one line, and its questions counted.
+      ;; The list shows the session and where it works, not the prompts.
       (should (string-search (concat (abbreviate-file-name project) "  session session")
                              (buffer-string)))
-      (should (string-search "Questions (2)" (buffer-string))))))
+      (should-not (string-search "Questions" (buffer-string)))
+      (goto-char (point-min))
+      (while (not (eobp))
+        (should (memq (car-safe (tabulated-list-get-id)) '(session detail)))
+        (forward-line 1)))))
 
 (ert-deftest agent-shell-observer-a-session-opens-and-closes ()
   (agent-shell-observer-test-with-agents
     (agent-shell-observer-test--ask 1)
     (with-current-buffer (agent-shell-observer--list-buffer)
       (agent-shell-observer--refresh-list)
-      ;; A question on the go opens its session by itself.
-      (should (agent-shell-observer-test--question-lines))
+      ;; A prompt on the go opens its session by itself.
+      (should (agent-shell-observer-test--detail-lines))
       (goto-char (point-min))
       (agent-shell-observer-list-toggle-session)
-      (should-not (agent-shell-observer-test--question-lines))
+      (should-not (agent-shell-observer-test--detail-lines))
       (should (eq (car-safe (tabulated-list-get-id)) 'session))
       ;; Closed by hand, it stays closed when its question moves on.
       (agent-shell-observer-test--emit (car agent-shell-observer-test--shells)
                                     'permission-request)
-      (should-not (agent-shell-observer-test--question-lines))
+      (should-not (agent-shell-observer-test--detail-lines))
       (goto-char (point-min))
       (agent-shell-observer-list-toggle-session)
-      (should (agent-shell-observer-test--question-lines)))))
+      (should (agent-shell-observer-test--detail-lines)))))
 
 (ert-deftest agent-shell-observer-ret-on-a-session-opens-its-newest-question ()
   (agent-shell-observer-test-with-agents
@@ -996,12 +994,12 @@
           (clrhash agent-shell-observer--opened)
           (with-current-buffer (agent-shell-observer--list-buffer)
             (agent-shell-observer--refresh-list)
-            (should-not (agent-shell-observer-test--question-lines))
+            (should-not (agent-shell-observer-test--detail-lines))
             (goto-char (point-min))
             (save-window-excursion (agent-shell-observer-list-open)))
           (with-current-buffer (agent-shell-observer--list-buffer)
             (agent-shell-observer--refresh-list)
-            (should-not (agent-shell-observer-test--question-lines))
+            (should-not (agent-shell-observer-test--detail-lines))
             ;; With a space between the arrow and the mark.
             (goto-char (point-min))
             (should (string-match-p "\\`[▶▼] [●○]"
@@ -1192,11 +1190,9 @@
       (agent-shell-observer-test--ask 2)
       (with-current-buffer (agent-shell-observer--list-buffer)
         (agent-shell-observer--refresh-list)
-        (let (opened visited)
+        (let (opened)
           (cl-letf (((symbol-function 'agent-shell-observer--open-file)
-                     (lambda (file) (setq opened file)))
-                    ((symbol-function 'agent-shell-observer--visit)
-                     (lambda (file line) (setq visited (list file line)))))
+                     (lambda (file) (setq opened file))))
             ;; The session's directory.
             (goto-char (point-min))
             (search-forward (abbreviate-file-name project))
@@ -1204,13 +1200,6 @@
             (should (eq (key-binding [mouse-1]) #'agent-shell-observer-follow-link))
             (agent-shell-observer-follow-link)
             (should (equal opened project))
-            ;; The code a question is about, at its line.
-            (goto-char (point-min))
-            (search-forward "Questions (")
-            (search-forward "/code.el:2")
-            (backward-char 1)
-            (agent-shell-observer-follow-link)
-            (should (equal visited (list file 2)))
             ;; Elsewhere on a line, RET still opens the line.
             (beginning-of-line)
             (should (eq (key-binding (kbd "RET")) #'agent-shell-observer-list-open))))))))
@@ -1275,7 +1264,7 @@
       (clrhash agent-shell-observer--opened)
       (with-current-buffer (agent-shell-observer--list-buffer)
         (agent-shell-observer--refresh-list)
-        (should-not (agent-shell-observer-test--question-lines))
+        (should-not (agent-shell-observer-test--detail-lines))
         ;; Opening the closed session brings its conversation back...
         (goto-char (point-min))
         (save-window-excursion (agent-shell-observer-list-open))
@@ -1283,7 +1272,7 @@
       ;; ...and leaves its drop-down closed, the row saying so meanwhile.
       (with-current-buffer (agent-shell-observer--list-buffer)
         (agent-shell-observer--refresh-list)
-        (should-not (agent-shell-observer-test--question-lines))
+        (should-not (agent-shell-observer-test--detail-lines))
         (should (equal (car (car (agent-shell-observer-test--session-rows))) "Restoring"))
         (goto-char (point-min))
         (agent-shell-observer-list-toggle-session)
