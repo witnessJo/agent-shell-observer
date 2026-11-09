@@ -10,24 +10,14 @@
 ;; This file is not part of GNU Emacs.
 
 ;;; Commentary:
-;; `agent-shell-observer-explain' sends the current line or region, with
-;; its file and lines, to an agent-shell and asks it to explain;
-;; `agent-shell-observer-ask' asks a question of one's own about it, and
-;; `agent-shell-observer-prompt' one of `agent-shell-observer-prompts',
-;; found by name.  Every prompt ends with `agent-shell-observer-prompt-hook'.
-;; The agent is the first of `agent-shell-observer-agents' that is installed
-;; and not resting after a failure, and a question it fails, or never
-;; starts on, goes to the next.  `agent-shell-observer-set-first-agent' picks
-;; the agent tried first and saves the order with Custom.
-;;
 ;; Every agent session goes into one list, `*agent-observer*', at the
 ;; right of the frame, with the agent-shell of the conversation picked
 ;; below it.  A session's row says whether its shell runs, what it is
 ;; doing (working, waiting for a permission or a question, idle), its
 ;; agent, project, git branch, when it last did something and its task,
-;; and opens like a drop-down onto its details and its questions.  The
-;; answer, permission requests and follow-ups are the shell's own; the
-;; list keeps where each question was asked and how far its answer has
+;; and opens like a drop-down onto its details and its prompts.  The
+;; answers, permission requests and follow-ups are the shell's own; the
+;; list keeps where each prompt was sent and how far its answer has
 ;; come.  `agent-shell-observer-toggle' shows or hides both.
 ;;
 ;; With the list closed, the mode line counts the shells waiting for you
@@ -38,6 +28,10 @@
 ;; To follow every agent shell from its start:
 ;;
 ;;   (add-hook 'agent-shell-mode-hook #'agent-shell-observer-watch-shell)
+;;
+;; Commands of one's own can send prompts that the list follows, with
+;; `agent-shell-observer-submit'; `agent-shell-observer-failed-functions'
+;; hears when one fails, to send it elsewhere.
 
 ;;; Code:
 
@@ -65,65 +59,18 @@
   "Watch and ask the coding agents."
   :group 'tools)
 
-(defvar agent-shell-observer-question
-  "Explain what this code does. Look up its related definitions and callers in the project if needed, and summarize the key behavior and anything to watch out for. Do not modify any files."
-  "Question `agent-shell-observer-explain' asks about code.")
-
-(defvar agent-shell-observer-document-question
-  "Explain this document in plain terms. Check any code, commands or settings it mentions against the project, and keep it short. Do not modify any files."
-  "Question `agent-shell-observer-explain' asks about prose.
-It is asked in `text-mode' buffers.")
-
-(defvar agent-shell-observer-answer-style
-  "When you refer to a place in the code, write it as `path:line` relative to the project root (e.g. `src/foo.el:42`)."
-  "What every `agent-shell-observer-explain' question adds about the answer's form.
-Places written as path:line are ones the shell's links can follow.")
-
-(defvar agent-shell-observer-prompt-hook nil
-  "What goes at the very end of every prompt, after the code, or nil.
-The place for what holds whatever is asked, such as the language of
-the answer, as in \"Answer in Korean.\"")
-
-(defvar agent-shell-observer-prompts
-  '(("explain" . "Explain what this code does. Look up its related definitions and callers in the project if needed, and summarize the key behavior and anything to watch out for. Do not modify any files.")
-    ("review: bugs" . "Review this code for bugs, unhandled edge cases and error handling problems. List each concrete issue with where it is and why it matters. Do not modify any files.")
-    ("review: security" . "Review this code for security problems such as injection, unsafe handling of input, missing authorization checks or leaked secrets. Explain how each one could be exploited. Do not modify any files.")
-    ("review: performance" . "Look for performance problems in this code, such as needless work, repeated computation, extra allocations or blocking calls. Suggest concrete improvements. Do not modify any files.")
-    ("refactor: simplify" . "Suggest how to make this code simpler and clearer without changing its behavior. Show the rewritten code, but do not modify any files.")
-    ("refactor: naming" . "Suggest clearer names for the variables, functions and types in this code, with a short reason for each. Do not modify any files.")
-    ("test: write unit tests" . "Write unit tests for this code that cover its normal cases and edge cases, following the testing style already used in the project. Show the tests, but do not modify any files.")
-    ("docs: docstring" . "Write a concise docstring or comment for this code that explains its purpose, arguments, return value and side effects, in the style of the surrounding code. Do not modify any files.")
-    ("trace: callers" . "Find where this code is used in the project and explain how each caller depends on it. Do not modify any files.")
-    ("trace: data flow" . "Trace where the data used in this code comes from and where its results go, across the project. Do not modify any files.")
-    ("debug: explain error" . "Explain the likely cause of this error or failure and how to fix it, checking the related code in the project. Do not modify any files.")
-    ("compare: alternatives" . "Describe other ways to implement what this code does, with their trade-offs against the current approach. Do not modify any files."))
-  "Prompts to pick from with `agent-shell-observer-prompt', as (NAME . PROMPT).
-Names are what is searched; a prefix such as \"review:\" groups them.")
-
-(defcustom agent-shell-observer-agents '(antigravity claude-code codex)
-  "Agent identifiers `agent-shell-observer-explain' prefers, most wanted first.
-It asks the project's shell that comes first here, and when there is
-none, starts the first one whose command is installed.  Shells of
-agents not here are never asked.  `agent-shell-observer-set-first-agent'
-puts one first and saves the order with Custom."
-  :type '(repeat symbol)
-  :group 'agent-shell-observer)
-
-(defvar agent-shell-observer-rest-seconds 1800
-  "How long an agent that failed a question is passed over, in seconds.
-A usage limit is the usual failure, and it does not lift at once.")
-
 (defvar agent-shell-observer-start-seconds 45
-  "How long a shell that has no session yet may keep a question waiting.
+  "How long a shell that has no session yet may keep a prompt waiting.
 An agent that is not signed in never starts one, and says nothing; its
-questions go on to the next agent after this many seconds.")
+prompts fail after this many seconds, for
+`agent-shell-observer-failed-functions' to send them elsewhere.")
 
 (defvar agent-shell-observer-list-display-action
   '((display-buffer-in-side-window)
     (side . right)
     (slot . 1)
     (window-width . 0.45))
-  "How the list of `agent-shell-observer-explain' questions is shown.")
+  "How the list of sessions is shown.")
 
 (defvar agent-shell-observer-shell-display-action
   '((display-buffer-in-side-window)
@@ -151,13 +98,7 @@ the list goes through them."
 (defvar agent-shell-observer-wide-list-share 0.4
   "The part of that width the list takes, the conversation the rest.")
 
-;;; The question
-;;
-;; What the agent gets: the question, how to write places in the answer,
-;; then where the code is and the code itself.
-
-(defvar agent-shell-observer-question-history nil
-  "Questions typed for `agent-shell-observer-explain'.")
+;;; History
 
 (defvar agent-shell-observer-history-file
   (locate-user-emacs-file "agent-shell-observer-history.eld")
@@ -174,208 +115,12 @@ This limits the local list and saved index; agent-owned sessions remain intact."
 Chunks of the same message count once.  Tool and thought notifications
 stay with their message.  The ACP server may still transmit older history.")
 
-(defun agent-shell-observer--bounds ()
-  "Return the region, or else the current line, as (BEG END).
-Signal an error when it holds nothing but whitespace."
-  (let ((bounds (if (use-region-p)
-                    (list (region-beginning) (region-end))
-                  (list (line-beginning-position) (line-end-position)))))
-    (when (string-blank-p (apply #'buffer-substring-no-properties bounds))
-      (user-error "Nothing to send here"))
-    bounds))
-
-(defun agent-shell-observer--context (beg end cwd)
-  "Describe the text between BEG and END for the agent and the list.
-Return a plist of :file, :line, :location -- the file made relative to
-CWD, the shell's project, when it lies inside it, and the lines --
-:language and :code."
-  (let* ((file (buffer-file-name))
-         (line-start (line-number-at-pos beg))
-         (line-end (line-number-at-pos (if (and (> end beg)
-                                                (save-excursion (goto-char end) (bolp)))
-                                           (1- end)
-                                         end))))
-    (list :file file
-          :line line-start
-          :location (format "%s:%s"
-                            (cond ((null file) (buffer-name))
-                                  ((and cwd (file-in-directory-p file cwd))
-                                   (file-relative-name file cwd))
-                                  (t (abbreviate-file-name file)))
-                            (if (= line-start line-end)
-                                line-start
-                              (format "%d-%d" line-start line-end)))
-          :language (string-remove-suffix
-                     "-mode" (string-remove-suffix "-ts-mode" (symbol-name major-mode)))
-          :code (string-trim-right (buffer-substring-no-properties beg end)))))
-
-(defun agent-shell-observer--prompt (question context)
-  "Wrap the code CONTEXT describes with QUESTION for the agent.
-`agent-shell-observer-prompt-hook' comes last."
-  (concat (format "%s\n%s\n\n%s\n```%s\n%s\n```"
-                  question agent-shell-observer-answer-style (plist-get context :location)
-                  (plist-get context :language) (plist-get context :code))
-          (if (and agent-shell-observer-prompt-hook
-                   (not (string-blank-p agent-shell-observer-prompt-hook)))
-              (concat "\n\n" agent-shell-observer-prompt-hook)
-            "")))
-
-(declare-function vertico--candidate "vertico")
-(defvar vertico--input)
-
-(defconst agent-shell-observer-prompt-preview-buffer "*agent-observer: prompt*"
-  "Name of the buffer showing the prompt being picked, whole.")
-
-(defun agent-shell-observer--prompt-candidate ()
-  "Return the name of the prompt being picked, or nil."
-  (if (and (bound-and-true-p vertico--input) (fboundp 'vertico--candidate))
-      (ignore-errors (vertico--candidate))
-    (minibuffer-contents-no-properties)))
-
-(defun agent-shell-observer--preview-prompt ()
-  "Show the prompt being picked whole, below, as it will be sent.
-The list of names has one line each, too narrow for the text."
-  (when-let* ((name (agent-shell-observer--prompt-candidate))
-              (text (alist-get name agent-shell-observer-prompts nil nil #'equal)))
-    (let ((buffer (get-buffer-create agent-shell-observer-prompt-preview-buffer)))
-      (with-current-buffer buffer
-        (let ((inhibit-read-only t))
-          (erase-buffer)
-          (insert (propertize name 'face 'bold) "\n\n" text)
-          (when (and agent-shell-observer-prompt-hook
-                     (not (string-blank-p agent-shell-observer-prompt-hook)))
-            (insert "\n\n" (propertize agent-shell-observer-prompt-hook 'face 'shadow))))
-        (setq buffer-read-only t)
-        (visual-line-mode 1)
-        (goto-char (point-min)))
-      (when-let* ((window (display-buffer
-                           buffer '((display-buffer-in-side-window)
-                                    (side . bottom)
-                                    (slot . 0)
-                                    (window-height . fit-window-to-buffer)
-                                    (preserve-size . (nil . t))))))
-        (fit-window-to-buffer window 15 4)))))
-
-(defun agent-shell-observer--read-prompt ()
-  "Pick one of `agent-shell-observer-prompts' by its name.
-Each name shows its prompt beside it, as far as the line goes, and the
-one being picked shows whole in a window below.  Return the pair."
-  (let* ((width (apply #'max 0 (mapcar (lambda (prompt) (string-width (car prompt)))
-                                       agent-shell-observer-prompts)))
-         (annotate (lambda (name)
-                     (concat (make-string (- (+ width 2) (string-width name)) ?\s)
-                             (propertize (alist-get name agent-shell-observer-prompts nil nil #'equal)
-                                         'face 'completions-annotations))))
-         (preview (lambda ()
-                    ;; After the completion UI has picked its candidate.
-                    (add-hook 'post-command-hook #'agent-shell-observer--preview-prompt 90 t)
-                    (run-at-time 0 nil (lambda ()
-                                         (when (minibufferp)
-                                           (agent-shell-observer--preview-prompt)))))))
-    (unwind-protect
-        (assoc (minibuffer-with-setup-hook preview
-                 (completing-read
-                  "Prompt: "
-                  (lambda (string predicate action)
-                    (if (eq action 'metadata)
-                        `(metadata (category . agent-shell-observer-prompt)
-                                   (annotation-function . ,annotate)
-                                   (display-sort-function . identity))
-                      (complete-with-action action agent-shell-observer-prompts string predicate)))
-                  nil t))
-               agent-shell-observer-prompts)
-      (when-let* ((buffer (get-buffer agent-shell-observer-prompt-preview-buffer)))
-        (dolist (window (get-buffer-window-list buffer nil t))
-          (delete-window window))
-        (kill-buffer buffer)))))
-
-;;; Choosing the agent
-
-(defvar agent-shell-observer--agent-commands
-  '((antigravity agent-shell-antigravity agent-shell-antigravity-acp-command)
-    (claude-code agent-shell-anthropic agent-shell-anthropic-claude-acp-command)
-    (codex agent-shell-openai agent-shell-openai-codex-acp-command)
-    (opencode agent-shell-opencode agent-shell-opencode-acp-command))
-  "Feature and command variable of each agent, to tell it is installed.")
-
-(defun agent-shell-observer--installed-p (agent)
-  "Return non-nil when AGENT's command can be run."
-  (pcase (alist-get agent agent-shell-observer--agent-commands)
-    ('nil t)
-    (`(,feature ,variable)
-     (require feature)
-     (executable-find (car (symbol-value variable))))))
-
-(defun agent-shell-observer-set-first-agent (agent)
-  "Make AGENT the one `agent-shell-observer-explain' tries first.
-AGENT moves to the front of `agent-shell-observer-agents', or is added there,
-and the order is saved with Custom so later sessions keep it."
-  (interactive
-   (let* ((candidates (delete-dups
-                       (append agent-shell-observer-agents
-                               (mapcar #'car agent-shell-observer--agent-commands))))
-          (names (mapcar (lambda (agent)
-                           (format "%s%s" agent
-                                   (cond ((eq agent (car agent-shell-observer-agents))
-                                          " (first now)")
-                                         ((memq agent agent-shell-observer-agents) "")
-                                         (t " (not listed)"))))
-                         candidates))
-          (choice (completing-read "First agent: " names nil t)))
-     (list (nth (seq-position names choice) candidates))))
-  (customize-save-variable
-   'agent-shell-observer-agents (cons agent (remq agent agent-shell-observer-agents)))
-  (message "Agent order: %s%s"
-           (mapconcat #'symbol-name agent-shell-observer-agents ", ")
-           (if (ignore-errors (agent-shell-observer--installed-p agent)) ""
-             (format " (%s is not installed)" agent))))
-
-(defvar agent-shell-observer--rested nil
-  "Agents that failed a question, with when, as (AGENT . TIME).")
+;;; Agents
 
 (defun agent-shell-observer--agent-of (shell-buffer)
   "Return the identifier of the agent SHELL-BUFFER runs."
   (with-current-buffer shell-buffer
     (map-nested-elt agent-shell--state '(:agent-config :identifier))))
-
-(defun agent-shell-observer--resting-agents ()
-  "Return the agents that failed within `agent-shell-observer-rest-seconds'.
-Failures older than that are forgotten."
-  (let ((since (- (float-time) agent-shell-observer-rest-seconds)))
-    (setq agent-shell-observer--rested
-          (seq-filter (lambda (rest) (> (cdr rest) since)) agent-shell-observer--rested))
-    (delete-dups (mapcar #'car agent-shell-observer--rested))))
-
-(defun agent-shell-observer--shell-buffer (&optional skip)
-  "Return the project's shell for `agent-shell-observer-explain'.
-One is started if needed.  Of the shells already open, the agent earliest in
-`agent-shell-observer-agents' wins, then the one used last.  With none open,
-the first installed agent starts in a new session, without asking.
-Agents in SKIP are never chosen, and those resting after a failure only
-when nothing else is left.  Return nil when no agent is."
-  (let* ((cwd (agent-shell-cwd))
-         (rank (lambda (buffer)
-                 (seq-position agent-shell-observer-agents
-                               (agent-shell-observer--agent-of buffer))))
-         (choose
-          (lambda (avoid)
-            (or (car (seq-sort-by
-                      rank #'<
-                      (seq-filter (lambda (buffer)
-                                    (let ((agent (agent-shell-observer--agent-of buffer)))
-                                      (and (memq agent agent-shell-observer-agents)
-                                           (not (memq agent avoid)))))
-                                  (agent-shell-project-buffers cwd))))
-                (when-let* ((config (seq-some
-                                     (lambda (agent)
-                                       (and (not (memq agent avoid))
-                                            (agent-shell-observer--installed-p agent)
-                                            (agent-shell--resolve-config-designator agent)))
-                                     agent-shell-observer-agents)))
-                  (agent-shell--start :config config :no-focus t :new-session t
-                                      :session-strategy 'new :cwd cwd))))))
-    (or (funcall choose (append skip (agent-shell-observer--resting-agents)))
-        (funcall choose skip))))
 
 ;;; The list
 
@@ -768,13 +513,17 @@ Opening it, and so bringing a closed one back, leaves it as it is."
     (unless (string-match-p agent-shell-observer--generic-title-regexp line)
       line)))
 
+(defvar agent-shell-observer-title-text-function nil
+  "Function of an entry returning the text its title is written from.
+Nil, or a nil return, for the entry's prompt as sent.  For commands that
+add the same text to every prompt, to leave it out of the titles.")
+
 (defun agent-shell-observer--title-source (entry)
-  "Return what ENTRY's title is written from.
-Its prompt, short of what every prompt adds."
-  (let ((text (or (plist-get entry :prompt) "")))
-    (dolist (added (list agent-shell-observer-answer-style agent-shell-observer-prompt-hook))
-      (when (and (stringp added) (not (string-empty-p added)))
-        (setq text (string-replace added "" text))))
+  "Return what ENTRY's title is written from."
+  (let ((text (or (and agent-shell-observer-title-text-function
+                       (funcall agent-shell-observer-title-text-function entry))
+                  (plist-get entry :prompt)
+                  "")))
     (truncate-string-to-width (string-trim text) 700)))
 
 (defun agent-shell-observer--clean-title (text)
@@ -1929,29 +1678,24 @@ conversation has finished replaying, so its question can now be found."
   (agent-shell-observer--save-history)
   (agent-shell-observer--refresh-list))
 
-(defun agent-shell-observer--add-entry (cwd question context &optional title)
-  "Put QUESTION about CONTEXT at the top of the list and return it.
-CWD is the project the agent answers in.  TITLE names the question in
-the list; without one a typed question names itself and a default one
-goes unnamed."
+(defun agent-shell-observer--add-entry (cwd prompt props)
+  "Put PROMPT, to be sent in CWD, at the top of the list and return it.
+PROPS is the plist `agent-shell-observer-submit' takes."
   (let* ((project (file-name-nondirectory (directory-file-name cwd)))
-         (file (plist-get context :file))
+         (file (plist-get props :file))
+         (location (plist-get props :location))
          (entry (list :id (setq agent-shell-observer--next-id (1+ agent-shell-observer--next-id))
                       :time (format-time-string "%H:%M")
                       :cwd cwd
-                      ;; Questions from every project share the list.
-                      :location (if (and file (file-in-directory-p file cwd))
-                                    (concat project "/" (plist-get context :location))
-                                  (plist-get context :location))
-                      :anchor (plist-get context :location)
+                      ;; Prompts from every project share the list.
+                      :location (if (and file location (file-in-directory-p file cwd))
+                                    (concat project "/" location)
+                                  location)
+                      :anchor location
                       :file file
-                      :line (plist-get context :line)
-                      :title (or title
-                                 (unless (member question
-                                                 (list agent-shell-observer-question
-                                                       agent-shell-observer-document-question))
-                                   (car (split-string question "\n"))))
-                      :prompt (agent-shell-observer--prompt question context)
+                      :line (plist-get props :line)
+                      :title (plist-get props :title)
+                      :prompt prompt
                       :status "Waiting" :agent nil :shell nil :session-id nil
                       :failed nil :tried nil))
          (list (agent-shell-observer--list-buffer)))
@@ -2316,17 +2060,32 @@ Called in the shell buffer."
        (dolist (entry (delq nil (cons current agent-shell-observer--pending)))
          (agent-shell-observer--set-status entry "Shell closed"))))))
 
+(defvar agent-shell-observer-failed-functions nil
+  "Functions told that a prompt of the list failed.
+Each is called with the entry, the agent that failed it and why.  One
+that returns non-nil has taken the entry on, as by sending it to another
+shell with `agent-shell-observer-resubmit'; when none does, the entry
+shows the error.")
+
 (defun agent-shell-observer--fail (shell-buffer entries message)
-  "Give ENTRIES to the next agent, SHELL-BUFFER's having failed with MESSAGE.
-That agent rests for `agent-shell-observer-rest-seconds'."
+  "Report ENTRIES failed by SHELL-BUFFER's agent with MESSAGE."
   (let ((agent (agent-shell-observer--agent-of shell-buffer)))
-    (push (cons agent (float-time)) agent-shell-observer--rested)
     ;; Out of the shell's event, which is no place to start another.
     (dolist (entry entries)
-      (run-at-time 0 nil #'agent-shell-observer--retry entry agent message))))
+      (run-at-time 0 nil #'agent-shell-observer--failed entry agent message))))
+
+(defun agent-shell-observer--failed (entry agent message)
+  "Let `agent-shell-observer-failed-functions' take ENTRY, failed by AGENT.
+MESSAGE says why; when no function takes it, ENTRY shows the error."
+  (plist-put entry :failed (cons (format "%s failed: %s" agent message)
+                                 (plist-get entry :failed)))
+  (unless (run-hook-with-args-until-success 'agent-shell-observer-failed-functions
+                                            entry agent message)
+    (message "agent-observer: %s failed: %s" agent message)
+    (agent-shell-observer--set-status entry "Error")))
 
 (defun agent-shell-observer--check-started (entry shell-buffer)
-  "Give ENTRY to the next agent if SHELL-BUFFER never started a session for it."
+  "Fail ENTRY if SHELL-BUFFER never started a session for it."
   (when (and (buffer-live-p shell-buffer)
              (with-current-buffer shell-buffer
                (and (memq entry agent-shell-observer--pending)
@@ -2336,24 +2095,6 @@ That agent rests for `agent-shell-observer-rest-seconds'."
     (agent-shell-observer--fail
      shell-buffer (list entry)
      (format "no session after %ds, is it signed in?" agent-shell-observer-start-seconds))))
-
-(defun agent-shell-observer--retry (entry agent message)
-  "Ask ENTRY's question of the next agent, AGENT having failed with MESSAGE.
-Agents the question has been to are not asked again; with none left,
-it shows the error."
-  (let ((shell-buffer (let ((default-directory (plist-get entry :cwd)))
-                        (agent-shell-observer--shell-buffer
-                         (cons agent (plist-get entry :tried))))))
-    (plist-put entry :tried (cons agent (plist-get entry :tried)))
-    (plist-put entry :failed (cons (format "%s failed: %s" agent message)
-                                   (plist-get entry :failed)))
-    (message "agent-observer: %s failed (%s), %s" agent message
-             (if shell-buffer
-                 (format "asking %s" (agent-shell-observer--agent-of shell-buffer))
-               "no other agent left"))
-    (if shell-buffer
-        (agent-shell-observer--dispatch entry shell-buffer)
-      (agent-shell-observer--set-status entry "Error"))))
 
 (defun agent-shell-observer--dispatch (entry shell-buffer)
   "Send ENTRY's prompt to SHELL-BUFFER, and show the shell below the list."
@@ -2380,7 +2121,8 @@ it shows the error."
                             :shell-buffer shell-buffer)
       (with-current-buffer shell-buffer
         (agent-shell-prompt-queue prompt))))
-  (agent-shell-observer--show entry))
+  (agent-shell-observer--show entry)
+  entry)
 
 (defun agent-shell-observer--shell-gone ()
   "Show the shells as they are now that one has gone."
@@ -2419,56 +2161,23 @@ For `agent-shell-mode-hook', so shells started on their own show too."
 
 ;;; Commands
 
-(defun agent-shell-observer--send (beg end question &optional title)
-  "Send the text between BEG and END with QUESTION to the agent shell.
-A nil QUESTION is `agent-shell-observer-document-question' in documents
-such as Markdown, Org or plain text, and `agent-shell-observer-question'
-elsewhere.  The question goes to the top of the list, named TITLE when
-given, with the shell answering it below."
+(defun agent-shell-observer-submit (shell-buffer prompt &rest props)
+  "Send PROMPT to SHELL-BUFFER and follow it at the top of the list.
+PROPS may give :title, what the list calls it; :file and :line, the code
+it is about, which `v' in the list visits; and :location, where that
+code is, as the prompt says it, such as \"src/foo.el:10-20\".  The shell
+is shown below the list.  Return the entry, for
+`agent-shell-observer-resubmit'."
   (require 'agent-shell)
-  (let* ((question (or question
-                       (if (derived-mode-p 'text-mode)
-                           agent-shell-observer-document-question
-                         agent-shell-observer-question)))
-         (shell-buffer (or (agent-shell-observer--shell-buffer)
-                           (user-error "None of `agent-shell-observer-agents' is installed")))
-         (cwd (with-current-buffer shell-buffer
-                (agent-shell-observer--ensure-sendable)
-                (agent-shell-cwd)))
-         (entry (agent-shell-observer--add-entry
-                 cwd question (agent-shell-observer--context beg end cwd) title)))
-    (deactivate-mark)
-    (agent-shell-observer--dispatch entry shell-buffer)
-    (let ((first (car agent-shell-observer-agents))
-          (asked (agent-shell-observer--agent-of shell-buffer)))
-      (unless (eq asked first)
-        (message "Asking %s: %s is %s" asked first
-                 (if (agent-shell-observer--installed-p first) "resting after a failure"
-                   "not installed"))))))
+  (agent-shell-observer--ensure-sendable shell-buffer)
+  (let ((cwd (with-current-buffer shell-buffer (agent-shell-cwd))))
+    (agent-shell-observer--dispatch
+     (agent-shell-observer--add-entry cwd prompt props) shell-buffer)))
 
-(defun agent-shell-observer-explain (beg end)
-  "Ask the project's agent shell to explain the region or current line.
-The text goes with its file and line numbers so the agent can read
-around it, and is submitted at once, or queued while the agent is busy."
-  (interactive (agent-shell-observer--bounds))
-  (agent-shell-observer--send beg end nil))
-
-(defun agent-shell-observer-ask (beg end question)
-  "Ask the project's agent shell QUESTION about the region or current line.
-A blank QUESTION falls back to the one `agent-shell-observer-explain' asks."
-  (interactive
-   (append (agent-shell-observer--bounds)
-           (list (read-string "Ask agent (empty for default): " nil
-                              'agent-shell-observer-question-history))))
-  (agent-shell-observer--send beg end (unless (string-blank-p question) question)))
-
-(defun agent-shell-observer-prompt (beg end prompt)
-  "Ask the project's agent shell one of `agent-shell-observer-prompts'.
-It is about the region or the current line, and is picked by its name;
-the list shows the name."
-  (interactive
-   (append (agent-shell-observer--bounds) (list (agent-shell-observer--read-prompt))))
-  (agent-shell-observer--send beg end (cdr prompt) (car prompt)))
+(defun agent-shell-observer-resubmit (entry shell-buffer)
+  "Send ENTRY's prompt again, to SHELL-BUFFER, as when its agent failed it.
+Return ENTRY."
+  (agent-shell-observer--dispatch entry shell-buffer))
 
 (defun agent-shell-observer-toggle ()
   "Show or hide the list of sessions and the conversation beside it.

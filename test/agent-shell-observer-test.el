@@ -1,165 +1,7 @@
-;;; agent-shell-observer-test.el --- Asking agents about code -*- lexical-binding: t -*-
+;;; agent-shell-observer-test.el --- Tests of the session list -*- lexical-binding: t -*-
 
-;; The shells are fakes: a buffer with the state an agent-shell keeps,
-;; whose events the tests send themselves.
-
-(require 'package)
-(setq load-prefer-newer t)
-(package-initialize)
-(require 'ert)
-(require 'cl-lib)
-(require 'crm)
-;; Loaded here, so the tests' own notifications-notify is not redefined.
-(require 'notifications nil t)
-(require 'agent-shell)
-(add-to-list 'load-path
-  (file-name-directory (directory-file-name (file-name-directory load-file-name))))
-(defvar agent-shell-observer-history-file)
-(let ((agent-shell-observer-history-file nil))
-  (require 'agent-shell-observer))
-
-(defvar agent-shell-observer-test--handlers nil
-  "Each fake shell's event handler, as (SHELL . HANDLER).")
-
-(defvar agent-shell-observer-test--shells nil
-  "The fake shells open, newest first.")
-
-(defvar agent-shell-observer-test--silent nil
-  "Agents whose shells never start a session, like one not signed in.")
-
-(defun agent-shell-observer-test--shell (agent cwd)
-  "Return a new fake shell of AGENT in CWD."
-  (let ((buffer (generate-new-buffer (format " *fake %s*" agent))))
-    (with-current-buffer buffer
-      (setq default-directory cwd)
-      (setq-local agent-shell--state
-                  `((:agent-config . ((:identifier . ,agent)))
-                    (:session . ((:id . ,(unless (memq agent agent-shell-observer-test--silent)
-                                           "session")))))))
-    (push buffer agent-shell-observer-test--shells)
-    buffer))
-
-(defun agent-shell-observer-test--emit (shell event &rest data)
-  "Have SHELL report EVENT with DATA."
-  (with-current-buffer shell
-    (funcall (alist-get shell agent-shell-observer-test--handlers)
-             (list (cons :event event) (cons :data data)))))
-
-(defun agent-shell-observer-test--rows ()
-  "Return the question rows of the list, as lists of their columns.
-Sessions are opened first, so every question is in the list."
-  (with-current-buffer agent-shell-observer-list-buffer
-    (dolist (session (agent-shell-observer--sessions))
-      (agent-shell-observer--set-open session t))
-    (agent-shell-observer--refresh-list)
-    (let (rows)
-      (goto-char (point-min))
-      (while (not (eobp))
-        (when (integerp (tabulated-list-get-id))
-          (push (append (tabulated-list-get-entry) nil) rows))
-        (forward-line 1))
-      (nreverse rows))))
-
-(defmacro agent-shell-observer-test-with-agents (&rest body)
-  "Run BODY with fake shells for antigravity and codex in a fresh list."
-  (declare (indent 0))
-  `(let* ((project (file-name-as-directory (make-temp-file "agent-shell-observer-" t)))
-          (file (expand-file-name "code.el" project))
-          (agent-shell-observer-agents '(antigravity codex))
-          (agent-shell-observer-start-seconds 0.2)
-          (agent-shell-observer--entries nil)
-          (agent-shell-observer--next-id 0)
-          (agent-shell-observer-history-file (expand-file-name "history.eld" project))
-          (agent-shell-observer--history-readable t)
-          (agent-shell-observer--shown nil)
-          (agent-shell-observer--rested nil)
-          (agent-shell-observer--opened (make-hash-table :test #'equal))
-          (agent-shell-observer--closed (make-hash-table :test #'equal))
-          (agent-shell-observer--filter nil)
-          (agent-shell-observer--filter-terms nil)
-          (agent-shell-observer-notify-states nil)
-          ;; No titles are written unless a test asks; none reach Ollama.
-          (agent-shell-observer-summarize-titles nil)
-          (agent-shell-observer--title-queue nil)
-          (agent-shell-observer--title-busy nil)
-          (agent-shell-observer--title-given-up nil)
-          (agent-shell-observer--title-resume-at 0)
-          (agent-shell-observer-test--handlers nil)
-          (agent-shell-observer-test--shells nil)
-          (agent-shell-observer-test--silent agent-shell-observer-test--silent))
-     (with-temp-file file (insert "first line\nsecond line\nthird line\n"))
-     (unwind-protect
-         (cl-letf (((symbol-function 'agent-shell-cwd)
-                    (lambda (&rest _) project))
-                   ((symbol-function 'agent-shell-project-buffers)
-                    (lambda (&rest _) agent-shell-observer-test--shells))
-                   ((symbol-function 'agent-shell-observer--installed-p)
-                    (lambda (agent) (memq agent '(antigravity codex))))
-                   ((symbol-function 'agent-shell--resolve-config-designator)
-                    (lambda (agent) `((:identifier . ,agent))))
-                   ((symbol-function 'agent-shell--start)
-                    (lambda (&rest args)
-                      (agent-shell-observer-test--shell
-                       (map-elt (plist-get args :config) :identifier) project)))
-                   ((symbol-function 'agent-shell-subscribe-to)
-                    (lambda (&rest args)
-                      (push (cons (plist-get args :shell-buffer) (plist-get args :on-event))
-                            agent-shell-observer-test--handlers)
-                      'subscription))
-                   ((symbol-function 'agent-shell--can-insert-into-prompt-p)
-                    (lambda (&rest _) t))
-                   ((symbol-function 'agent-shell-insert)
-                    (lambda (&rest args)
-                      (let ((shell (plist-get args :shell-buffer)))
-                        (with-current-buffer shell
-                          (goto-char (point-max))
-                          (insert "\n> " (plist-get args :text) "\n"))
-                        (unless (memq (agent-shell-observer--agent-of shell)
-                                      agent-shell-observer-test--silent)
-                          (agent-shell-observer-test--emit
-                           shell 'input-submitted :prompt (plist-get args :text)))))))
-           (with-current-buffer (find-file-noselect file)
-             ,@body))
-       (dolist (shell agent-shell-observer-test--shells) (kill-buffer shell))
-       (when-let* ((buffer (find-buffer-visiting file)))
-         (with-current-buffer buffer (set-buffer-modified-p nil))
-         (kill-buffer buffer))
-       (when (get-buffer agent-shell-observer-list-buffer)
-         (kill-buffer agent-shell-observer-list-buffer))
-       (delete-directory project t))))
-
-(defun agent-shell-observer-test--ask (line &optional question)
-  "Ask about LINE of the current buffer, with QUESTION if given."
-  (goto-char (point-min))
-  (forward-line (1- line))
-  (agent-shell-observer--send (line-beginning-position) (line-end-position) question))
-
-(defun agent-shell-observer-test--settle (seconds)
-  "Let timers run for SECONDS."
-  (let ((end (+ (float-time) seconds)))
-    (while (< (float-time) end)
-      (accept-process-output nil 0.02))))
-
-(ert-deftest agent-shell-observer-prompt-says-where-the-code-is ()
-  (agent-shell-observer-test-with-agents
-    (goto-char (point-min))
-    (forward-line 1)
-    (let* ((context (agent-shell-observer--context
-                     (line-beginning-position) (line-end-position) project))
-           (prompt (agent-shell-observer--prompt "Why?" context)))
-      (should (equal (plist-get context :location) "code.el:2"))
-      (should (equal (plist-get context :line) 2))
-      (should (string-prefix-p "Why?\n" prompt))
-      (should (string-search agent-shell-observer-answer-style prompt))
-      (should (string-search "code.el:2\n```emacs-lisp\nsecond line\n```" prompt)))))
-
-(ert-deftest agent-shell-observer-region-spans-its-lines ()
-  (agent-shell-observer-test-with-agents
-    (let ((context (agent-shell-observer--context
-                    (point-min) (save-excursion (goto-char (point-min)) (forward-line 2) (point))
-                    project)))
-      ;; A region ending at a line's start does not take that line.
-      (should (equal (plist-get context :location) "code.el:1-2")))))
+(add-to-list 'load-path (file-name-directory (or load-file-name buffer-file-name)))
+(require 'agent-shell-observer-test-helpers)
 
 (ert-deftest agent-shell-observer-status-follows-the-shell ()
   (agent-shell-observer-test-with-agents
@@ -209,43 +51,41 @@ Sessions are opened first, so every question is in the list."
       ;; The default question is left out of the list.
       (should (equal (nth 4 (nth 1 rows)) "")))))
 
-(ert-deftest agent-shell-observer-failure-goes-to-the-next-agent ()
+(ert-deftest agent-shell-observer-a-failure-without-a-taker-is-an-error ()
   (agent-shell-observer-test-with-agents
     (agent-shell-observer-test--ask 1)
-    (let ((antigravity (car agent-shell-observer-test--shells)))
-      (agent-shell-observer-test--emit antigravity 'error :message "usage limit")
+    (agent-shell-observer-test--emit (car agent-shell-observer-test--shells)
+                                     'error :message "usage limit")
+    (agent-shell-observer-test--settle 0.05)
+    (should (equal (nth 1 (car (agent-shell-observer-test--rows))) "Error"))
+    (should (equal (plist-get (car agent-shell-observer--entries) :failed)
+                   '("antigravity failed: usage limit")))))
+
+(ert-deftest agent-shell-observer-failed-functions-can-send-a-prompt-elsewhere ()
+  (agent-shell-observer-test-with-agents
+    (let* (heard
+           (agent-shell-observer-failed-functions
+            (list (lambda (entry agent message)
+                    (push (list agent message) heard)
+                    (agent-shell-observer-resubmit
+                     entry (agent-shell-observer-test--shell 'codex project))))))
+      (agent-shell-observer-test--ask 1)
+      (agent-shell-observer-test--emit (car agent-shell-observer-test--shells)
+                                       'error :message "usage limit")
       (agent-shell-observer-test--settle 0.05)
-      (should (equal (nth 2 (car (agent-shell-observer-test--rows))) "codex"))
-      (should (equal (plist-get (car agent-shell-observer--entries) :failed)
-                     '("antigravity failed: usage limit")))
-      ;; The failed agent rests: the next question skips it too.
-      (agent-shell-observer-test--ask 2)
-      (should (equal (nth 2 (car (agent-shell-observer-test--rows))) "codex")))))
+      (should (equal heard '((antigravity "usage limit"))))
+      (should (equal (cdr (seq-take (car (agent-shell-observer-test--rows)) 3))
+                     '("Running" "codex"))))))
 
-(ert-deftest agent-shell-observer-no-agent-left-is-an-error ()
-  (agent-shell-observer-test-with-agents
-    (agent-shell-observer-test--ask 1)
-    (agent-shell-observer-test--emit (car agent-shell-observer-test--shells) 'error :message "one")
-    (agent-shell-observer-test--settle 0.05)
-    (agent-shell-observer-test--emit (car agent-shell-observer-test--shells) 'error :message "two")
-    (agent-shell-observer-test--settle 0.05)
-    (should (equal (nth 1 (car (agent-shell-observer-test--rows))) "Error"))))
-
-(ert-deftest agent-shell-observer-agent-that-never-starts-is-passed-over ()
+(ert-deftest agent-shell-observer-a-shell-that-never-starts-fails-its-prompt ()
   (let ((agent-shell-observer-test--silent '(antigravity)))
     (agent-shell-observer-test-with-agents
       (agent-shell-observer-test--ask 1)
       (should (equal (nth 1 (car (agent-shell-observer-test--rows))) "Waiting"))
       (agent-shell-observer-test--settle 0.4)
-      (should (equal (nth 2 (car (agent-shell-observer-test--rows))) "codex"))
+      (should (equal (nth 1 (car (agent-shell-observer-test--rows))) "Error"))
       (should (string-prefix-p "antigravity failed: no session after"
                                (car (plist-get (car agent-shell-observer--entries) :failed)))))))
-
-(ert-deftest agent-shell-observer-unlisted-shells-are-not-asked ()
-  (agent-shell-observer-test-with-agents
-    (agent-shell-observer-test--shell 'opencode project)
-    (agent-shell-observer-test--ask 1)
-    (should (equal (nth 2 (car (agent-shell-observer-test--rows))) "antigravity"))))
 
 (ert-deftest agent-shell-observer-shells-started-on-their-own-join-the-list ()
   (agent-shell-observer-test-with-agents
@@ -273,30 +113,6 @@ Sessions are opened first, so every question is in the list."
       (agent-shell-observer--list-buffer)
       (agent-shell-observer-test--emit shell 'input-submitted :prompt "Workflow step")
       (should (null agent-shell-observer--entries)))))
-
-(ert-deftest agent-shell-observer-first-agent-is-asked-first ()
-  (agent-shell-observer-test-with-agents
-    (let (saved)
-      (cl-letf (((symbol-function 'customize-save-variable)
-                 (lambda (symbol value &rest _)
-                   (push symbol saved)
-                   (set symbol value))))
-        (agent-shell-observer-set-first-agent 'codex)
-        (should (equal agent-shell-observer-agents '(codex antigravity)))
-        (should (equal saved '(agent-shell-observer-agents)))
-        (agent-shell-observer-test--ask 1)
-        (should (equal (nth 2 (car (agent-shell-observer-test--rows))) "codex"))
-        ;; An agent not listed yet joins at the front.
-        (agent-shell-observer-set-first-agent 'opencode)
-        (should (equal agent-shell-observer-agents '(opencode codex antigravity)))))))
-
-(ert-deftest agent-shell-observer-resting-forgets-old-failures ()
-  (let ((agent-shell-observer-rest-seconds 60)
-        (agent-shell-observer--rested (list (cons 'codex (float-time))
-                                        (cons 'codex (- (float-time) 10))
-                                        (cons 'antigravity (- (float-time) 120)))))
-    (should (equal (agent-shell-observer--resting-agents) '(codex)))
-    (should (= (length agent-shell-observer--rested) 2))))
 
 ;;; Closed shells
 
@@ -339,7 +155,7 @@ Sessions are opened first, so every question is in the list."
               (lambda (&rest _) (ert-fail "History must not queue a prompt")))
              ((symbol-function 'agent-shell-observer--dispatch)
               (lambda (&rest _) (ert-fail "History must not dispatch a question")))
-             ((symbol-function 'agent-shell-observer--retry)
+             ((symbol-function 'agent-shell-observer--failed)
               (lambda (&rest _) (ert-fail "History must not retry a question")))
              ((symbol-function 'agent-shell-observer--fail)
               (lambda (&rest _) (ert-fail "History must not switch agents")))
@@ -1094,49 +910,6 @@ Sessions are opened first, so every question is in the list."
           (should (equal (agent-shell-observer-test--view)
                          (list (+ 7 (nth 0 view)) (+ 7 (nth 1 view)) 0))))))))
 
-;;; Registered prompts
-
-(ert-deftest agent-shell-observer-hook-ends-every-prompt ()
-  (agent-shell-observer-test-with-agents
-    (let* ((agent-shell-observer-prompt-hook "Answer in Korean.")
-           (context (agent-shell-observer--context (point-min) (line-end-position) project)))
-      (should (string-suffix-p "```\n\nAnswer in Korean." (agent-shell-observer--prompt "Why?" context)))
-      (let ((agent-shell-observer-prompt-hook nil))
-        (should (string-suffix-p "first line\n```" (agent-shell-observer--prompt "Why?" context)))))))
-
-(ert-deftest agent-shell-observer-prompts-are-in-english ()
-  (should (> (length agent-shell-observer-prompts) 5))
-  (dolist (prompt agent-shell-observer-prompts)
-    (should (string-match-p "\\`[[:ascii:]]+\\'" (car prompt)))
-    (should (string-match-p "\\`[[:ascii:]]+\\'" (cdr prompt))))
-  ;; So is what `agent-shell-observer-explain' and `-ask' send; the hook sets the answer's language.
-  (dolist (text (list agent-shell-observer-question agent-shell-observer-document-question
-                      agent-shell-observer-answer-style))
-    (should (string-match-p "\\`[[:ascii:]]+\\'" text))))
-
-(ert-deftest agent-shell-observer-prompt-sends-the-picked-prompt-under-its-name ()
-  (agent-shell-observer-test-with-agents
-    (let ((agent-shell-observer-prompt-hook "Answer in Korean.")
-          sent)
-      (cl-letf (((symbol-function 'completing-read)
-                 (lambda (_prompt collection &rest _)
-                   ;; The table answers what the picker asks of it.
-                   (should (eq (completion-metadata-get
-                                (funcall collection "" nil 'metadata) 'category)
-                               'agent-shell-observer-prompt))
-                   (should (member "review: bugs" (all-completions "review" collection)))
-                   "review: bugs"))
-                ((symbol-function 'agent-shell-insert)
-                 (lambda (&rest args) (setq sent (plist-get args :text)))))
-        (goto-char (point-min))
-        (forward-line 1)
-        (call-interactively #'agent-shell-observer-prompt))
-      (should (string-prefix-p (alist-get "review: bugs" agent-shell-observer-prompts nil nil #'equal)
-                               sent))
-      (should (string-search "code.el:2\n```emacs-lisp\nsecond line\n```" sent))
-      (should (string-suffix-p "Answer in Korean." sent))
-      (should (equal (nth 4 (car (agent-shell-observer-test--rows))) "review: bugs")))))
-
 ;;; Sessions
 
 (defun agent-shell-observer-test--question-lines ()
@@ -1343,6 +1116,8 @@ Sessions are opened first, so every question is in the list."
 (ert-deftest agent-shell-observer-a-session-is-named-by-a-title-of-its-first-question ()
   (agent-shell-observer-test-with-agents
     (let ((agent-shell-observer-summarize-titles t)
+          (agent-shell-observer-title-text-function
+           (lambda (entry) (concat "Title of: " (plist-get entry :prompt))))
           asked)
       (cl-letf (((symbol-function 'agent-shell-observer--request-title)
                  (lambda (text callback)
@@ -1355,11 +1130,9 @@ Sessions are opened first, so every question is in the list."
         (agent-shell-observer-test--ask 2 "And this one?")
         (with-current-buffer (agent-shell-observer--list-buffer)
           (agent-shell-observer--refresh-list)
-          ;; Each question once, without what every prompt adds.
+          ;; Each question once, from what the title function makes of it.
           (should (= (length asked) 2))
-          (should-not (seq-some (lambda (text)
-                                  (string-search agent-shell-observer-answer-style text))
-                                asked))
+          (should (seq-every-p (lambda (text) (string-prefix-p "Title of: " text)) asked))
           (should (equal (plist-get (cadr agent-shell-observer--entries) :summary)
                          "Read the first line"))
           ;; The session goes by its first question's title.
