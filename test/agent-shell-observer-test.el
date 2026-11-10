@@ -1340,7 +1340,7 @@
       (agent-shell-observer-test--ask 1)
       (let ((entry (car agent-shell-observer--entries))
             (edges (lambda (window) (window-edges window))))
-        (dolist (layout '(right left below))
+        (dolist (layout '(right left below above))
           (let ((agent-shell-observer-layout layout))
             (agent-shell-observer-hide)
             (agent-shell-observer-toggle)
@@ -1356,9 +1356,14 @@
                                    (nth 0 (funcall edges shell)))))
                 ('left (should (= (nth 2 (funcall edges shell))
                                   (nth 0 (funcall edges list)))))
-                ;; Below: one above the other, in the same columns.
+                ;; Below or above: one over the other, in the same columns.
                 ('below (should (= (nth 3 (funcall edges list))
-                                   (nth 1 (funcall edges shell))))))
+                                   (nth 1 (funcall edges shell)))))
+                ('above (should (= (nth 3 (funcall edges shell))
+                                   (nth 1 (funcall edges list))))
+                        ;; The list keeps its share, the conversation the rest.
+                        (should (< (window-total-height list)
+                                   (window-total-height shell)))))
               ;; Other buffers do not take the side-by-side windows.
               (when (memq layout '(right left))
                 (should (window-dedicated-p list))
@@ -1367,9 +1372,14 @@
         (agent-shell-observer-hide)
         (should-not (get-buffer-window agent-shell-observer-list-buffer))
         (should-not (agent-shell-observer--shell-window))
-        ;; L goes below, right, left, and back.
+        ;; L goes below, above, right, left, and back.
         (let ((agent-shell-observer-layout 'below))
           (agent-shell-observer-toggle)
+          (agent-shell-observer-list-cycle-layout)
+          (should (eq agent-shell-observer-layout 'above))
+          (should (< (nth 1 (window-edges (agent-shell-observer--shell-window)))
+                     (nth 1 (window-edges (get-buffer-window
+                                           agent-shell-observer-list-buffer)))))
           (agent-shell-observer-list-cycle-layout)
           (should (eq agent-shell-observer-layout 'right))
           (should (window-parameter (agent-shell-observer--shell-window)

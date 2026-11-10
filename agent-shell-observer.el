@@ -83,10 +83,11 @@ prompts fail after this many seconds, for
 
 (defcustom agent-shell-observer-layout 'below
   "Where the conversation goes beside the list.
-`below' it, the two as one panel at the right of the frame; or to its
-`right' or `left', the two side by side at the right of the frame.  L in
-the list goes through them."
+`below' or `above' it, the two as one panel at the right of the frame;
+or to its `right' or `left', the two side by side at the right of the
+frame.  L in the list goes through them."
   :type '(choice (const :tag "Below the list" below)
+                 (const :tag "Above the list" above)
                  (const :tag "Right of the list" right)
                  (const :tag "Left of the list" left))
   :group 'agent-shell-observer)
@@ -1398,13 +1399,28 @@ sessions, and a shell still open stays in the list."
   "Return non-nil when the list and conversation go side by side."
   (memq agent-shell-observer-layout '(right left)))
 
+(defun agent-shell-observer--shell-display-action ()
+  "Return how the conversation is shown in a panel with the list.
+`agent-shell-observer-shell-display-action', its slot put before the
+list's when the conversation goes `above' it."
+  (let ((action agent-shell-observer-shell-display-action))
+    (if (not (eq agent-shell-observer-layout 'above))
+        action
+      (cons (car action)
+            ;; Negative slots go before every slot from 0 up.
+            (cons (cons 'slot (- (1+ (abs (or (alist-get 'slot (cdr action)) 0)))))
+                  (assq-delete-all 'slot (copy-alist (cdr action))))))))
+
 (defun agent-shell-observer--shell-window ()
   "Return the window beside the list that shows a question's shell, if any."
-  (seq-find (lambda (window)
-              (or (eq (window-parameter window 'agent-shell-observer-role) 'shell)
-                  (and (eq (window-parameter window 'window-side) 'right)
-                       (eq (window-parameter window 'window-slot) 2))))
-            (window-list nil 'no-minibuf)))
+  (let* ((action (cdr (agent-shell-observer--shell-display-action)))
+         (side (alist-get 'side action))
+         (slot (alist-get 'slot action)))
+    (seq-find (lambda (window)
+                (or (eq (window-parameter window 'agent-shell-observer-role) 'shell)
+                    (and (eq (window-parameter window 'window-side) side)
+                         (eql (window-parameter window 'window-slot) slot))))
+              (window-list nil 'no-minibuf))))
 
 (defun agent-shell-observer--display-list ()
   "Show the list where `agent-shell-observer-layout' puts it.
@@ -1429,7 +1445,7 @@ Return its window."
   "Show SHELL where `agent-shell-observer-layout' puts the conversation.
 Return its window.  Side by side, the list's window is split for it."
   (if (not (agent-shell-observer--wide-p))
-      (display-buffer shell agent-shell-observer-shell-display-action)
+      (display-buffer shell (agent-shell-observer--shell-display-action))
     (when-let* ((window
                  (or (agent-shell-observer--shell-window)
                      (when-let* ((list (agent-shell-observer--display-list))
@@ -1471,12 +1487,14 @@ Return its window.  Side by side, the list's window is split for it."
         (quit-restore-window window 'bury)))))
 
 (defun agent-shell-observer-list-cycle-layout ()
-  "Put the conversation below the list, then to its right, then to its left."
+  "Put the conversation below the list, above it, to its right, or to its left.
+Each in turn, from where it is now."
   (interactive)
   (let ((shell (when-let* ((window (agent-shell-observer--shell-window)))
                  (window-buffer window))))
     (setq agent-shell-observer-layout
-          (pcase agent-shell-observer-layout ('below 'right) ('right 'left) (_ 'below)))
+          (pcase agent-shell-observer-layout
+            ('below 'above) ('above 'right) ('right 'left) (_ 'below)))
     (agent-shell-observer-hide)
     (agent-shell-observer-toggle)
     ;; A shell shown with no question of the list comes back too.
@@ -1487,7 +1505,7 @@ Return its window.  Side by side, the list's window is split for it."
       (select-window window))
     (message "agent-observer: the conversation %s the list"
              (pcase agent-shell-observer-layout
-               ('below "below") ('right "right of") (_ "left of")))))
+               ('below "below") ('above "above") ('right "right of") (_ "left of")))))
 
 (defun agent-shell-observer-list-scroll-left ()
   "Move the history viewport eight columns toward the start of its rows."

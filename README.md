@@ -20,7 +20,7 @@ conversation shows below the list.
 
 - **One list for every session.** `agent-shell-observer-toggle` shows or hides
   the list and the conversation beside it. Press `L` in the list to put the
-  conversation below the list, to its right, or to its left.
+  conversation below the list, above it, to its right, or to its left.
 - **Notifications.** While the list is closed, the mode line counts the shells
   waiting for you (⚑) and the ones working (▶). A desktop notification tells
   you when a shell asks for a permission, finishes, or fails, unless you are
@@ -76,7 +76,7 @@ Or clone the repository and use `:load-path` instead of `:vc`.
 | `RET` / double click | Open the conversation below the list |
 | `f` | Show all sessions, only those waiting for you, or only those working |
 | `/` | Filter by agent, project, branch or state |
-| `L` | Put the conversation below, to the right of, or to the left of the list |
+| `L` | Put the conversation below, above, to the right of, or to the left of the list |
 | `r` | Name the session; an empty name gives back its default one |
 | `D` | Remove a closed session from the list (the agent keeps its sessions) |
 | `g` | Refresh |
@@ -86,7 +86,7 @@ Or clone the repository and use `:load-path` instead of `:vc`.
 
 | Variable | Default | |
 |---|---|---|
-| `agent-shell-observer-layout` | `below` | Where the conversation goes: `below`, `right` or `left` of the list |
+| `agent-shell-observer-layout` | `below` | Where the conversation goes: `below`, `above`, `right` or `left` of the list |
 | `agent-shell-observer-history-file` | `agent-shell-observer-history.eld` in `user-emacs-directory` | Where prompts are saved; `nil` turns saving off |
 | `agent-shell-observer-notify-states` | `(waiting done error)` | Which states send a desktop notification |
 | `agent-shell-observer-summarize-titles` | `t` | Have a local Ollama model name sessions from their first prompt |
